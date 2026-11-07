@@ -126,6 +126,10 @@ F1 @12 MHz、239.5 cycles → 252/12 MHz ≈ **21 µs**；F4 @21 MHz、144 cycle
 
 顺序不能跳：前一步不通，后一步的现象一定是假的。每步都给了"失败时最可能的三个原因"。
 
+> **2026-11-07 首联进度**：本机未枚举到任何串口设备（证据与结论见 §8.1），八步**尚未在实物上执行**。
+> 自动核对脚本已就绪：`python tools/bringup_check.py --port COM3`，逐帧留痕 + 遥测 CSV + 报告，
+> 用法与判定口径见 §8.2。
+
 ### 第 1 步 · UART 收发通路（不接传感器、不接执行器）
 
 - **操作**：只接 USB-TTL（TX↔RX 交叉、GND 共地），上位机选对端口、115200 8N1，点"连接"。
@@ -139,7 +143,9 @@ F1 @12 MHz、239.5 cycles → 252/12 MHz ≈ **21 µs**；F4 @21 MHz、144 cycle
 
 - **操作**：用串口工具发黄金向量 PING 帧（10 字节）：
   `AA 55 00 01 C0 70 77 77 77 77`
-- **预期**：立刻收到 PONG，载荷两字节 `fw_ver=0x01`、`status=1`。
+- **预期**：立刻收到 PONG，载荷两字节 `fw_ver=0x02`（v0.2，见第 5 节与 `mcu/Inc/pid_app.h`
+  的 `PID_FW_VERSION=2`）、`status=1`。
+  > 2026-11-07 核对修正：本节原写 `fw_ver=0x01`，与固件常量不符（手册错误，已改）。
 - **注意**：当前 PC 上位机**不发** PING（协议里定义了、固件实现了 PONG，但 PC 侧没有发送点，
   属通信可靠性那一轮的缺口）。所以这一步必须用串口工具或脚本手动发，不要指望点"连接"就能看到。
 - **失败先查这三条**：
@@ -446,6 +452,64 @@ HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_8);   /* 记得在 CubeMX 里把 PA8 配成�
 | H7 全族（含 NVM 的 flashword 分支） | **桩验证**，未对真实 H7 头文件核对、未上板 | 需装 `STM32Cube_FW_H7` 后跑脚本 + 上板 | H7 板 + Cube H7 包 |
 | ADC 标定与量程 | 未验证 | 第 7.4 节万用表对照 | 实物板 + 已知输入源 |
 | 中断优先级配置是否合理 | 未验证 | 第 7.3 节观察 ORE 与节拍抖动 | 实物板 |
+
+### 8.1 首联实测进度（2026-11-07）：0/8 步执行，阻塞于无串口设备
+
+结论：**八步一步都没有在实物上执行**。原计划使用的 `COM3` 在本机不存在，卡 34 的前置条件
+"CH340 已在位"当次不成立。下表所有"仅编译通过"的项保持原状，不因本轮工作改写成"已上板验证"。
+
+当次取证（同一时刻、同一台 Windows 本机、Python 3.13 + pyserial）：
+
+| 检查 | 手段 | 实测结果 |
+| --- | --- | --- |
+| 串口枚举 | `serial.tools.list_ports.comports()` | `[]`（0 个设备） |
+| 打开 COM3 | `serial.Serial("COM3", 115200)` | `SerialException: could not open port 'COM3': FileNotFoundError(2, '系统找不到指定的文件。')` |
+| 即插即用 | `Get-PnpDevice -PresentOnly`，筛 Ports 类与 `VID_1A86` | 无 Ports 类设备；无 `VID_1A86`（CH340）节点 |
+| 注册表端口映射 | `HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM` | 键不存在 |
+| WMI 串口 | `Get-CimInstance Win32_SerialPort` | 无输出 |
+
+**恢复条件**（缺一不可）：开发板已烧录本轮固件；CH340/USB-TTL 插好且设备管理器出现
+`USB-SERIAL CH340 (COMx)`；TX/RX 交叉、GND 共地。满足后执行 §8.2 的命令，八步结果以脚本报告为准。
+
+**本轮唯一能落地的一条验收：拔板后的界面提示准确**。在真实的"零串口"机器上直接调用生产路径
+`serialpid.port_scan.scan_ports()`：`status=empty`、`summary=未发现串口设备`、提示"请检查 USB 线与
+驱动是否正常，或改用「内置模拟器」离线体验"，无假 `COM1`；GUI 侧该说明项置灰、`_serial_target()`
+为空（`test_serial_empty_state_has_no_fake_com1` 通过）；脚本对不存在的 `COM3` 返回退出码 2 并提示
+先确认 CH340 枚举。以上均有本轮实测输出，其余八步无实测。
+
+### 8.2 一条命令跑完八步（`tools/bringup_check.py`）
+
+```bash
+# 正常首联：第 2–7 步自动核对，遥测统计 60 s
+python tools/bringup_check.py --port COM3 --seconds 60
+
+# 第 1 步 UART 回环：先把 TX-RX 短接（做完拔掉短接再跑上面的完整流程）
+python tools/bringup_check.py --port COM3 --loopback
+
+# 第 8 步拆两半（中间人工断电）
+python tools/bringup_check.py --port COM3 --nvm-write    # 下发 SP=50，等 5 s 防抖
+# 断电 → 等 2 s → 上电
+python tools/bringup_check.py --port COM3 --nvm-verify   # 只读遥测，不下发任何帧
+```
+
+判定口径与产物：
+
+| 项 | 规则 |
+| --- | --- |
+| 退出码 | 0 = 自动项全 PASS；1 = 有 FAIL；2 = 无串口 / 连不上（环境问题，不判固件死刑） |
+| 帧留痕 | `docs/bringup_frames_<时间>.jsonl`，每帧方向 + 原始字节，可逐字节 diff |
+| 遥测 CSV | `docs/bringup_telemetry_<时间>.csv`，固定六列 `pc_time_s,t_ms,sp,pv,out,err`，可作回归基线 |
+| 报告 | `docs/bringup_report_<时间>.md`，每步"结论 / 实测值 / 差异 / 证据" |
+| 第 4 步 | 以固件 `t_ms` 差分判 50 ms ±2.5 ms、抖动 ≤5 ms；PC 侧收帧间隔另列，只作参考（USB 串口批量上报会放大抖动） |
+| 第 5–6 步 | 标记 `OBSERVED`（数值已记录），PV 需人工改变被测量、PWM 需示波器，脚本不代替仪器下结论 |
+| 第 8 步 | 必须人工断电；`--nvm-verify` 不发送任何帧，只读上电后遥测的 SP |
+
+脚本自身已用离线模拟器（`tools/fake_mcu.py --port 19011` + `--tcp 127.0.0.1:19011`）跑过一遍，
+只证明脚本能跑通，**不证明固件**：本次自测第 2 步 WARN（模拟器 PONG `fw_ver=0x10`，与固件
+`PID_FW_VERSION=2` 不一致，见 BUGS B-08）、第 3 步 FAIL（模拟器未拒绝 `Kp=1e9`，属模拟器缺口）、
+第 4 步 PASS（10 s 199 帧，`t_ms` 间隔均值 50.13 ms、抖动 1.0 ms）、第 7 步 PASS
+（RUNNING→DONE 5033 ms，设定保持 5000 ms）。报告里模式列会写明"非真机（TCP 离线模拟器）"。
+
 
 **已确认的编译期事实**（可以放心引用）：
 
