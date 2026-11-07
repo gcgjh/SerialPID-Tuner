@@ -6,7 +6,7 @@
  * 而这个文件本来由 CubeMX 生成。这里给一份"只开示例用到的模块"的最小版本，
  * 让示例能对着**真实 HAL 头文件**编译一遍，用来核对桩里的签名没有漂移。
  *
- * 只开：RCC / GPIO / DMA / CORTEX / FLASH / UART / TIM（示例实际用到的）。
+ * 只开：RCC / GPIO / DMA / CORTEX / FLASH / UART / TIM / ADC（示例实际用到的）。
  * 不要把这个文件当成模板抄进产品工程——产品工程该用 CubeMX 生成的那一份。
  */
 
@@ -21,6 +21,7 @@
 #define HAL_FLASH_MODULE_ENABLED
 #define HAL_UART_MODULE_ENABLED
 #define HAL_TIM_MODULE_ENABLED
+#define HAL_ADC_MODULE_ENABLED
 
 #define HSE_VALUE               8000000U
 #define HSE_STARTUP_TIMEOUT     100U
@@ -42,5 +43,6 @@
 #include "stm32f4xx_hal_flash.h"
 #include "stm32f4xx_hal_uart.h"
 #include "stm32f4xx_hal_tim.h"
+#include "stm32f4xx_hal_adc.h"
 
 #endif /* STM32F4xx_HAL_CONF_H */

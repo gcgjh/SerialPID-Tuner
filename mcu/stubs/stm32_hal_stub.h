@@ -15,9 +15,15 @@
  *      的签名写，属于"桩验证、未经真实 HAL 核对"（见 docs/wiring.md 的验证矩阵）。
  *   3. 族差异要保留。三个族可用哪些擦除/编程宏是不同的，`pid_nvm_stm32_example.c`
  *      正是靠这些宏选分支；桩里若把三族的宏都给全，分支选择就永远测不出来。
+ *      ADC1 的寄存器基址三族也不同（F1 0x40012400 / F4 0x40012000 / H7 0x40022000），
+ *      同理按族给，不能图省事写一个。
  *
  * 选择族：编译时定义 PID_HAL_STUB_FAMILY = 1 / 4 / 7（默认 1 = F1 系列）。
  *        编译验证脚本会分别用三个值各编一次。
+ *
+ * 本轮（卡29）新增 ADC 相关符号：真实 IO 分支（PID_DEMO_SIMULATED_PLANT=0）
+ * 要调用 HAL_ADC_Start / PollForConversion / GetValue / Stop 与 MX_ADC1_Init，
+ * 这些符号以前只在注释里出现过，桩里没有，导致"上板用的那半边代码"从未被编译。
  */
 
 #ifndef STM32_HAL_STUB_H
@@ -54,6 +60,12 @@ typedef struct {
     volatile uint32_t SR;
 } TIM_TypeDef;
 
+/** ADC 寄存器块：示例只做 Instance 比较，此处仅占位 */
+typedef struct {
+    volatile uint32_t SR;
+    volatile uint32_t DR;
+} ADC_TypeDef;
+
 typedef struct {
     volatile uint32_t ACR;
 } FLASH_TypeDef;
@@ -70,10 +82,32 @@ typedef struct {
     uint32_t     State;
 } TIM_HandleTypeDef;
 
+/** ADC 句柄：真实结构体字段很多，示例只用 Instance 吗？——不，示例一个字段都不读，
+ *  只用指针。这里仍保留 Instance 以贴近真实定义。 */
+typedef struct {
+    ADC_TypeDef *Instance;
+    uint32_t     State;
+} ADC_HandleTypeDef;
+
 /** 外设实例：地址取真实基址，语义与 CubeMX 生成的一致 */
 #define USART1 ((USART_TypeDef *)0x40013800UL)
 #define TIM3   ((TIM_TypeDef *)0x40000400UL)
 #define TIM6   ((TIM_TypeDef *)0x40001000UL)
+#define TIM4   ((TIM_TypeDef *)0x40000800UL)
+
+#if (PID_HAL_STUB_FAMILY == 1)
+#define ADC1 ((ADC_TypeDef *)0x40012400UL)   /* F1: ADC1 base */
+#elif (PID_HAL_STUB_FAMILY == 4)
+#define ADC1 ((ADC_TypeDef *)0x40012000UL)   /* F4: ADC1 base */
+#else
+#define ADC1 ((ADC_TypeDef *)0x40022000UL)   /* H7: ADC1/ADC2 共用基址 */
+#endif
+
+/** 定时器通道宏：真实 HAL 的三族取值一致（H7 另有 CH5/CH6） */
+#define TIM_CHANNEL_1 0x00000000U
+#define TIM_CHANNEL_2 0x00000004U
+#define TIM_CHANNEL_3 0x00000008U
+#define TIM_CHANNEL_4 0x0000000CU
 
 /** Flash 擦除参数：三族字段并集（F1 用 PageAddress/NbPages，F4 用 Sector/NbSectors/
  *  VoltageRange，H7 额外用 Banks）。真实 HAL 各族的结构体也是这一族字段的并集。 */
@@ -102,6 +136,12 @@ HAL_StatusTypeDef HAL_UART_AbortReceive_IT(UART_HandleTypeDef *huart);
 HAL_StatusTypeDef HAL_TIM_Base_Start_IT(TIM_HandleTypeDef *htim);
 HAL_StatusTypeDef HAL_TIM_PWM_Start(TIM_HandleTypeDef *htim, uint32_t Channel);
 
+/* ADC：单次转换 + 轮询（与真实 HAL 的 F1/F4/H7 签名一致） */
+HAL_StatusTypeDef HAL_ADC_Start(ADC_HandleTypeDef *hadc);
+HAL_StatusTypeDef HAL_ADC_PollForConversion(ADC_HandleTypeDef *hadc, uint32_t Timeout);
+uint32_t          HAL_ADC_GetValue(ADC_HandleTypeDef *hadc);
+HAL_StatusTypeDef HAL_ADC_Stop(ADC_HandleTypeDef *hadc);
+
 HAL_StatusTypeDef HAL_FLASH_Unlock(void);
 HAL_StatusTypeDef HAL_FLASH_Lock(void);
 HAL_StatusTypeDef HAL_FLASH_Program(uint32_t TypeProgram, uint32_t Address,
@@ -120,6 +160,7 @@ void MX_GPIO_Init(void);
 void MX_USART1_UART_Init(void);
 void MX_TIM6_Init(void);
 void MX_TIM3_Init(void);
+void MX_ADC1_Init(void);
 void Error_Handler(void);
 
 /* ============================ 寄存器宏 ============================ */

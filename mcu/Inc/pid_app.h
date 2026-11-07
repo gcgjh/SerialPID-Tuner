@@ -30,8 +30,14 @@ extern "C" {
 #ifndef PID_NVM_SAVE_DELAY_MS
 #define PID_NVM_SAVE_DELAY_MS   5000u /**< 参数静默多久后落 Flash（防滑杆拖动磨损） */
 #endif
+/**
+ * 固件版本（PONG.fw_ver 的唯一真相）：高 4 位主版本，低 4 位次版本，
+ * 与仓库 tag 一一对应（规则见 docs/PROTOCOL.md §6）：
+ *   v0.2.0 -> 0x02   v1.0.0 -> 0x10   v1.2.3 -> 0x12（补丁号不进 fw_ver）
+ * 改这里的同时必须改 tag 与 CHANGELOG，三处任一漂移都会让用户报 bug时说不清版本。
+ */
 #ifndef PID_FW_VERSION
-#define PID_FW_VERSION          1u
+#define PID_FW_VERSION          2u
 #endif
 #ifndef PID_DEFAULT_MODE
 #define PID_DEFAULT_MODE        PID_MODE_POSITIONAL

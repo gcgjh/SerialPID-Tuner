@@ -107,6 +107,19 @@ Invoke-OneBuild "stub F1 main_example (PID_EXAMPLE_USE_TIM6=1)" "mcu/Src/main_ex
     "-DPID_HAL_STUB=1", "-DPID_HAL_STUB_FAMILY=1", "-DPID_EXAMPLE_USE_TIM6=1"
 )
 
+# ---------------------------------------------------------------- 2b. 真实 IO 分支
+# main_example.c 里 PWM + ADC 那半边代码只在 PID_DEMO_SIMULATED_PLANT=0 时参与编译。
+# 不单独编一次，就等于"上板用的那份代码"从来没进过编译验证——这正是卡29 要补的洞。
+Write-Host "== 真实 IO 分支（PWM + ADC，PID_DEMO_SIMULATED_PLANT=0）==" -ForegroundColor Cyan
+foreach ($fam in $families) {
+    Invoke-OneBuild ("stub " + $fam.Name + " main_example (REAL IO)") "mcu/Src/main_example.c" @(
+        "-mcpu=$($fam.Cpu)", "-mthumb", "-std=c11", "-O2", "-Wall", "-Wextra",
+        "-I", "mcu/Inc", "-I", "mcu/stubs",
+        "-DPID_HAL_STUB=1", "-DPID_HAL_STUB_FAMILY=$($fam.Id)",
+        "-DPID_DEMO_SIMULATED_PLANT=0"
+    )
+}
+
 # ---------------------------------------------------------------- 3. 真实 HAL 交叉验证
 if (-not $SkipRealHal) {
     $repoCandidates = @()
@@ -170,6 +183,12 @@ if (-not $SkipRealHal) {
                 "-I", $t.Conf, "-I", $halInc, "-I", $devInc, "-I", $coreInc, "-I", "mcu/Inc"
             )
         }
+        # 真实 IO 分支对真实 HAL 编一次：核对 ADC/PWM 的函数签名与通道宏是否真的存在
+        Invoke-OneBuild ("real " + $t.Family + " main_example (REAL IO)") "mcu/Src/main_example.c" @(
+            "-mcpu=$($t.Cpu)", "-mthumb", "-std=c11", "-O2", "-Wall", "-Wextra",
+            "-D$($t.Device)", "-DUSE_HAL_DRIVER", "-DPID_HAL_STUB=0", "-DPID_DEMO_SIMULATED_PLANT=0",
+            "-I", $t.Conf, "-I", $halInc, "-I", $devInc, "-I", $coreInc, "-I", "mcu/Inc"
+        )
     }
 }
 
