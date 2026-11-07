@@ -37,7 +37,7 @@
     {
       "step": "onboarding/配置落盘",
       "ok": true,
-      "detail": "C:\\Users\\shehu\\AppData\\Local\\Temp\\tmp_6xia06t\\config.json"
+      "detail": "C:\\Users\\shehu\\AppData\\Local\\Temp\\tmp3d7x1wwz\\config.json"
     },
     {
       "step": "onboarding/重开不再弹",
@@ -154,7 +154,7 @@
     {
       "step": "shots/01-main-window.png 重跑无漂移",
       "ok": true,
-      "detail": "diff=0.0105%"
+      "detail": "diff=0.0033%"
     },
     {
       "step": "shots/01-main-window.png 尺寸稳定",
@@ -164,7 +164,7 @@
     {
       "step": "shots/02-sim-panel.png 重跑无漂移",
       "ok": true,
-      "detail": "diff=0.0105%"
+      "detail": "diff=0.0033%"
     },
     {
       "step": "shots/02-sim-panel.png 尺寸稳定",
@@ -174,7 +174,7 @@
     {
       "step": "shots/03-port-diagnosis.png 重跑无漂移",
       "ok": true,
-      "detail": "diff=0.0709%"
+      "detail": "diff=0.0242%"
     },
     {
       "step": "shots/03-port-diagnosis.png 尺寸稳定",
@@ -184,7 +184,7 @@
     {
       "step": "shots/04-selftest-banner.png 重跑无漂移",
       "ok": true,
-      "detail": "diff=0.0039%"
+      "detail": "diff=0.0035%"
     },
     {
       "step": "shots/04-selftest-banner.png 尺寸稳定",
