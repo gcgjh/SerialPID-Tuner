@@ -1,13 +1,17 @@
 @echo off
 rem ============================================================
 rem  SerialPID-Tuner Windows 一键打包脚本
-rem  产物: dist\SerialPID-Tuner.exe（单文件、无控制台、带图标与版本信息）
+rem  产物: dist\SerialPID-Tuner-v<版本>.exe（单文件、无控制台、带图标与版本信息）
+rem        dist\SerialPID-Tuner.exe（稳定名副本，供文档 / 旧链接引用）
 rem  用法: 双击本脚本，或在仓库根目录执行 scripts\build.bat
 rem
 rem  说明:
 rem  - 解释器优先级: 仓库上一层 .venv 内的 python.exe > PATH 中的 python；
 rem    实际使用的解释器路径会在第一行打印，便于排查环境问题；
-rem  - 依赖已装好时跳过安装，避免每次构建重下 / 污染全局环境；
+rem  - 依赖按 pc\requirements-dev.txt 里锁定的版本安装（不裸装），保证换机器 / 换时间
+rem    打出来的包可复现；
+rem  - 版本号取自 pc\serialpid\__init__.py 的 __version__（唯一真相），
+rem    scripts\version_info.txt 由 tools\make_version_info.py 在打包前重新生成；
 rem  - 工作 / 输出目录放到系统临时目录（ASCII 路径），规避部分环境下
 rem    仓库路径含中文时 PyInstaller 持久化 PYZ 失败的问题；
 rem  - 打包完成后再把 exe 拷回仓库 dist\ 目录。
@@ -28,26 +32,38 @@ if not defined PY (
   )
   set "PY=python"
 )
-echo [环境] 使用解释器: %PY%
+echo [1/7] 使用解释器: %PY%
 "%PY%" -c "import sys; print('       版本:', sys.version.split()[0], '|', sys.executable)"
 
 "%PY%" -c "import PyInstaller, PIL" >nul 2>nul
 if errorlevel 1 (
-  echo [1/4] 缺少 PyInstaller / Pillow，安装运行 / 打包依赖...
-  "%PY%" -m pip install -r pc\requirements.txt
-  "%PY%" -m pip install pyinstaller pillow
+  echo [2/7] 缺少 PyInstaller / Pillow，按 requirements-dev.txt 安装锁定版本...
+  "%PY%" -m pip install -r pc\requirements-dev.txt
 ) else (
-  echo [1/4] 依赖已就绪（PyInstaller / Pillow）
+  echo [2/7] 依赖已就绪（PyInstaller / Pillow）
 )
 
-echo [2/4] 生成应用图标 assets\app.ico ...
+echo [3/7] 生成版本资源 scripts\version_info.txt ...
+"%PY%" tools\make_version_info.py
+if errorlevel 1 exit /b 1
+set "VERFILE=%TEMP%\serialpid-version.txt"
+"%PY%" tools\make_version_info.py --version > "%VERFILE%"
+set "VER="
+set /p VER=<"%VERFILE%"
+if not defined VER (
+  echo [ERR] 读取版本号失败
+  exit /b 1
+)
+echo       版本: %VER%
+
+echo [4/7] 生成应用图标 assets\app.ico ...
 "%PY%" tools\make_icon.py
 if errorlevel 1 exit /b 1
 
 set "WORK=%TEMP%\SerialPID-Tuner-build\work"
 set "DIST=%TEMP%\SerialPID-Tuner-build\dist"
 
-echo [3/4] PyInstaller 打包（onefile / windowed / 隐藏控制台）...
+echo [5/7] PyInstaller 打包（onefile / windowed / 隐藏控制台）...
 "%PY%" -m PyInstaller --noconfirm --clean --windowed --onefile ^
   --name SerialPID-Tuner ^
   --paths pc ^
@@ -69,9 +85,35 @@ if errorlevel 1 (
 )
 
 if not exist dist mkdir dist
-echo [4/4] 拷贝产物到 dist\ ...
-copy /Y "%DIST%\SerialPID-Tuner.exe" dist\SerialPID-Tuner.exe
+echo [6/7] 拷贝产物到 dist\（版本化 + 稳定名副本）...
+copy /Y "%DIST%\SerialPID-Tuner.exe" "dist\SerialPID-Tuner-v%VER%.exe"
+if errorlevel 1 exit /b 1
+copy /Y "%DIST%\SerialPID-Tuner.exe" "dist\SerialPID-Tuner.exe"
 if errorlevel 1 exit /b 1
 
-echo 打包完成: dist\SerialPID-Tuner.exe
+
+echo [7/7] 出包后自检 - card22，无控制台 exe 用 --selftest 落盘 JSON ...
+rem 源码环境：确认依赖、配置/日志目录、图标、协议往返都正常
+"%PY%" pc\main.py --selftest --json --out "%DIST%\selftest-src.json"
+if errorlevel 1 (
+  echo [ERR] 源码环境自检有失败项，明细见 %DIST%\selftest-src.json
+  copy /Y "%DIST%\selftest-src.json" dist\selftest-src.json >nul
+  exit /b 1
+)
+rem 打包产物：windowed 进程没有 stdout，必须 --out；cmd 跑 GUI 程序用 start /wait 才等得到退出码
+start /wait "" "%DIST%\SerialPID-Tuner.exe" --selftest --json --out "%DIST%\selftest-exe.json"
+if errorlevel 1 (
+  echo [ERR] 打包产物自检有失败项，明细见 %DIST%\selftest-exe.json
+  copy /Y "%DIST%\selftest-exe.json" dist\selftest-exe.json >nul
+  exit /b 1
+)
+if not exist "%DIST%\selftest-exe.json" (
+  echo [ERR] 打包产物自检没有产出结果文件: %DIST%\selftest-exe.json
+  exit /b 1
+)
+copy /Y "%DIST%\selftest-src.json" dist\selftest-src.json >nul
+copy /Y "%DIST%\selftest-exe.json" dist\selftest-exe.json >nul
+echo 自检通过: dist\selftest-src.json / dist\selftest-exe.json
+
+echo 打包完成: dist\SerialPID-Tuner-v%VER%.exe（稳定名副本 dist\SerialPID-Tuner.exe）
 endlocal

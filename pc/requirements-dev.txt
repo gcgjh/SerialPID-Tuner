@@ -1,6 +1,12 @@
 # 开发 / 打包 / 测试依赖（在 requirements.txt 运行依赖之上追加）
 -r requirements.txt
 
-pyinstaller>=6.0
-pillow>=10.0
-pytest>=8.0
+# 打包链路锁死版本：同一天同一份源码换个时间打包，装到别的 PyInstaller / Pillow
+# 会产出体积与行为都不同的 exe，发布报告里的哈希也就失去意义。
+# 锁死是为了可复现，不是永远不升：升级时在同一次提交里改这里，并完整跑一遍
+# scripts/release.py（测试 → 自检 → 打包 → 校验 → 冒烟）。
+pyinstaller==6.22.3
+pillow==12.0.0
+
+# 测试框架同样锁定：断言的 .dev 行为差异会让"275 passed"这种基线数字失真
+pytest==9.2.0
