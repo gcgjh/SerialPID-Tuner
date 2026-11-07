@@ -178,10 +178,12 @@ def test_formula_block_fits_narrow_panel() -> None:
                 width = label.fontMetrics().horizontalAdvance(line)
                 assert width <= label.width(), f"单行 {width}px 超过可用 {label.width()}px：{line}"
 
-    # 最小高度不得高于改动前（旧版 340 宽时 panel 最小高度 311）
-    assert panel.minimumSizeHint().height() <= 311, (
-        f"面板最小高度涨到 {panel.minimumSizeHint().height()}，会给左栏加负担"
-    )
+    # 最小高度不得明显高于改动前（Windows 默认字体下 311）。不能用固定 311：
+    # 行高随平台字体走（ubuntu 320 / macos-latest 338），而真正的回归是换行标签
+    # 把"整段公式文本高度"报成最小高度（会跳到 450+），所以给字体度量差异留
+    # 50px 余量，超了才是最小高度又文本顶上去。
+    min_h = panel.minimumSizeHint().height()
+    assert min_h <= 360, f"面板最小高度涨到 {min_h}，会给左栏加负担"
 
 
 # --------------------------------------------------------------------------- #

@@ -71,7 +71,10 @@ def test_transport_read_returns_empty_on_timeout():
     for _ in range(3):
         assert tr.read(64) == b""
     elapsed = time.monotonic() - t0
-    assert 0.03 <= elapsed <= 0.2, f"三次超时空读耗时 {elapsed:.3f}s，偏离 3×20ms"
+    # 上界不能贴着 3×20ms 卡：Windows 定时器粒度约 15.6ms，macos-latest runner 的
+    # sleep 同样被量化（2026-11-07 实测 0.270s，超时语义没坏，只是粒度粗）。
+    # 这条要防的是"永久阻塞接收线程"，不是毫秒精度，所以放到 0.5s。
+    assert 0.03 <= elapsed <= 0.5, f"三次超时空读耗时 {elapsed:.3f}s，偏离 3×20ms"
     assert tr.empty_reads == 3
     tr.close()
 

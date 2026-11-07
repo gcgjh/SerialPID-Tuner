@@ -52,6 +52,25 @@ _FONT_CANDIDATES = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+)
+
+#: 系统里已装、可以直接按族名用的中文字体。macOS（尤其 arm64 runner）上
+#: ``addApplicationFont`` 注册 PingFang.ttc 经常返回 -1，但族名本身是可用的，
+#: 少了这一层就会把"核心文本能自己找中文字体"误判成"一个字都画不出来"。
+_CJK_FAMILY_NAMES = (
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    "Noto Sans CJK TC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Arial Unicode MS",
 )
 
 #: 六张标准图的固定文件名与说明（README / 手册引用这些名字）
@@ -66,7 +85,13 @@ SHOTS = {
 
 
 def load_cjk_fonts() -> list[str]:
-    """把系统中文字体注册进 Qt，返回成功加载的字体族名。"""
+    """把系统中文字体注册进 Qt，返回可用的中文字体族名。
+
+    两层：先按文件路径注册（Windows / Linux 的 TTC 一般能注册上），再补一层
+    "系统里本来就有的中文族名"——macOS runner 上注册 PingFang.ttc 常常失败，
+    但 PingFang SC 在 QFontDatabase 里是现成的。返回空列表才代表真的没有中文
+    字体（截图会全是方块）。
+    """
     loaded: list[str] = []
     for path in _FONT_CANDIDATES:
         if not os.path.exists(path):
@@ -76,7 +101,33 @@ def load_cjk_fonts() -> list[str]:
             continue
         families = QFontDatabase.applicationFontFamilies(font_id)
         loaded.extend(str(name) for name in families)
+    installed = {str(name).strip() for name in QFontDatabase.families()}
+    for name in _CJK_FAMILY_NAMES:
+        if name in installed and name not in loaded:
+            loaded.append(name)
+    if loaded:
+        _release_fonts_at_exit()
     return loaded
+
+
+def _release_fonts_at_exit() -> None:
+    """退出前把注册进来的应用字体内存摘掉。
+
+    2026-11-07 的 ubuntu job 里，pytest 已经打印完汇总（1 failed, 524 passed）
+    之后进程以 ``Bus error (core dumped)``（退出码 135）结束——测试本身跑完了，
+    是解释器退出时字体引擎先释放了 mmap 的字体文件。这里在 atexit 阶段先摘掉
+    注册项，让字体引擎在 QApplication 之前收尾。
+    """
+    import atexit
+
+    def _cleanup() -> None:
+        try:
+            if QApplication.instance() is not None:
+                QFontDatabase.removeAllApplicationFonts()
+        except Exception:  # noqa: BLE001 - 退出阶段不能再抛异常
+            pass
+
+    atexit.register(_cleanup)
 
 
 def make_app() -> QApplication:
@@ -89,7 +140,7 @@ def make_app() -> QApplication:
     apply_dark(app)
     # 字体族按可用性挑：中文优先雅黑，找不到就沿用 Qt 默认（仍能出图，只是字丑）
     families = set(QFontDatabase.families())
-    for name in ("Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC"):
+    for name in ("Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB"):
         if name in families:
             app.setFont(QFont(name, 9))
             break

@@ -88,16 +88,38 @@ def test_package_job_runs_selftest_and_freshness_on_every_platform():
 
 def test_package_upload_includes_archives_and_platform_selftest():
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    steps = data["jobs"]["package"]["steps"]
     upload = next(
         step
-        for step in data["jobs"]["package"]["steps"]
+        for step in steps
         if step.get("uses", "").startswith("actions/upload-artifact")
     )
     path = upload["with"]["path"]
     assert "dist/SerialPID-Tuner-v*.tar.gz" in path
     assert "dist/SerialPID-Tuner-v*.zip" in path
     assert "dist/selftest-${{ matrix.platform }}.json" in path
-    assert upload["with"]["name"] == "SerialPID-Tuner-${{ matrix.platform }}"
+    # artifact 名要带平台与版本号（卡43 第一步的核对项）
+    assert upload["with"]["name"] == (
+        "SerialPID-Tuner-${{ steps.ver.outputs.version }}-${{ matrix.platform }}"
+    )
+    assert any(
+        step.get("id") == "ver" and "make_version_info.py --version" in step.get("run", "")
+        for step in steps
+    ), "artifact 名里的版本号必须取自包内版本，不能写死"
+
+
+def test_package_job_is_a_hard_gate_with_freshness_guard():
+    """矩阵 job 不许设成可跳过；构建前要清 dist，产物判据在 CI 里也要跑。"""
+    data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    package = data["jobs"]["package"]
+    assert not package.get("continue-on-error"), "出包矩阵失败不能设为可跳过"
+    steps = package["steps"]
+    names = [step.get("name", "") for step in steps]
+    assert any("构建前清空 dist" in name for name in names), "构建前必须清掉旧产物"
+    assert any("校验自检结果" in name for name in names), "selftest JSON 必须校验后再上传"
+    body = json.dumps(steps, ensure_ascii=False)
+    assert "check_artifact_freshness.py --require" in body
+    assert "%s.json" % "selftest-${{ matrix.platform }}" in body
 
 
 def test_release_job_only_on_tags_and_can_write_contents():

@@ -328,6 +328,25 @@ _PLATFORM_PLUGIN = {
 _PLATFORM_PLUGIN_FALLBACK = "libqxcb.so"
 
 
+def _plugin_suffix() -> str:
+    """Qt 平台插件的文件名后缀：Windows ``.dll`` / macOS ``.dylib`` / Linux ``.so``。
+
+    2026-11-07 三平台矩阵首跑，macOS 出包 job 就红在「源码环境启动自检」：CI 把
+    ``QT_QPA_PLATFORM`` 设成 ``offscreen``，而这里对非 Windows 一律拼 ``.so``，
+    在 macOS 上永远找不到 ``libqoffscreen.so``（真实文件名是 ``libqoffscreen.dylib``）。
+    后缀按平台取，不要再写死。
+    """
+    if sys.platform.startswith("win"):
+        return ".dll"
+    if sys.platform == "darwin":
+        return ".dylib"
+    return ".so"
+
+
+def _native_plugin_name() -> str:
+    return _PLATFORM_PLUGIN.get(sys.platform, _PLATFORM_PLUGIN_FALLBACK)
+
+
 def _check_qt_plugins() -> Tuple[str, str, str]:
     try:
         import PySide6  # noqa: F401
@@ -345,13 +364,23 @@ def _check_qt_plugins() -> Tuple[str, str, str]:
         os.path.join(base, "plugins", "platforms"),
     ]
     requested = os.environ.get("QT_QPA_PLATFORM", "").strip().lower()
+    suffix = _plugin_suffix()
     if requested in ("offscreen", "minimal"):
-        plugin = f"q{requested}.dll" if sys.platform.startswith("win") else f"libq{requested}.so"
+        plugin = f"q{requested}{suffix}" if sys.platform.startswith("win") else f"libq{requested}{suffix}"
     else:
-        plugin = _PLATFORM_PLUGIN.get(sys.platform, _PLATFORM_PLUGIN_FALLBACK)
+        plugin = _native_plugin_name()
     platforms = next((p for p in candidates if os.path.isdir(p)), candidates[0])
     path = os.path.join(platforms, plugin)
     if not os.path.exists(path):
+        native = os.path.join(platforms, _native_plugin_name())
+        if requested in ("offscreen", "minimal") and plugin != _native_plugin_name() and os.path.exists(native):
+            # 离屏插件只是无头运行（CI / 截图）用的；原生插件在位说明界面能起，
+            # 缺它降级成警告，不要让"没有 windows / macOS 图形界面"的东西把自检判死。
+            return (
+                STATUS_WARN,
+                f"PySide6 {version}；请求的离屏插件 {plugin} 不在位，原生插件 {_native_plugin_name()} 可用",
+                "只影响无头运行（CI / 截图）；需要离屏时重装 PySide6 或换 QT_QPA_PLATFORM",
+            )
         return (
             STATUS_FAIL,
             f"PySide6 {version} 已安装，但平台插件缺失：{path}",

@@ -178,12 +178,17 @@ def test_hold_duration_has_seconds_hint():
 def test_switching_state_does_not_change_height():
     panel = _panel()
     idle_h = panel._metrics_stack.height()
+    # 两页的文字会按字体度量折行，不同平台的行高本来就差几像素（Windows 141 /
+    # macos-latest 145）。这条要防的是"切换状态时面板明显长高/缩矮"，
+    # 所以容差取一行的字高，超过一行就是真的跳了。
+    tolerance = max(4, panel.fontMetrics().height())
     _feed_step_response(panel)
     panel._analyze_curve()
     _app().processEvents()
-    assert panel._metrics_stack.height() == idle_h, "两态切换导致高度跳动"
+    delta = abs(panel._metrics_stack.height() - idle_h)
+    assert delta <= tolerance, f"两态切换导致高度跳动 {idle_h}→{panel._metrics_stack.height()}（容差 {tolerance}）"
 
     panel.clear_samples()
     _app().processEvents()
     assert panel._metrics_stack.currentWidget() is panel._hint
-    assert panel._metrics_stack.height() == idle_h
+    assert abs(panel._metrics_stack.height() - idle_h) <= tolerance

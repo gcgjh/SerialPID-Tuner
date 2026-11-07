@@ -10,3 +10,7 @@ pillow==12.0.0
 
 # 测试框架同样锁定：断言的 .dev 行为差异会让"275 passed"这种基线数字失真
 pytest==9.2.0
+
+# 资源泄漏用例要读进程句柄/线程数（test_reconnect_resources）；不锁会在
+# 没有预装 psutil 的 runner 上直接 ModuleNotFoundError，把"没装依赖"报成"泄漏"
+psutil==7.2.2

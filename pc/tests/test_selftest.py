@@ -159,3 +159,48 @@ def test_qt_plugin_missing_reports_failure(tmp_path, monkeypatch):
     report = _run(tmp_path)
     check = report.get("qt_plugins")
     assert check.status == st.STATUS_FAIL and "缺失" in check.detail
+
+
+def _fake_pyside(monkeypatch, tmp_path, plugins):
+    """造一个假 PySide6 包：只提供 ``__file__``（插件目录按它算）与 ``__version__``。"""
+    import types
+
+    pkg = tmp_path / "PySide6"
+    platforms = pkg / "Qt" / "plugins" / "platforms"
+    platforms.mkdir(parents=True)
+    for name, present in plugins.items():
+        if present:
+            (platforms / name).write_bytes(b"fake")
+    module = types.ModuleType("PySide6")
+    module.__file__ = str(pkg / "__init__.py")
+    module.__version__ = "6.12.0"
+    monkeypatch.setitem(sys.modules, "PySide6", module)
+    return module
+
+
+def test_macos_offscreen_plugin_uses_dylib_suffix(tmp_path, monkeypatch):
+    """2026-11-07 macOS 出包 job 首跑就红在这：.so 后缀在 macOS 上永远找不到插件。"""
+    _fake_pyside(monkeypatch, tmp_path, {"libqoffscreen.dylib": True, "libqcocoa.dylib": True})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    status, detail, _ = st._check_qt_plugins()
+    assert status == st.STATUS_PASS
+    assert "libqoffscreen.dylib" in detail
+
+
+def test_missing_offscreen_plugin_falls_back_to_native_as_warning(tmp_path, monkeypatch):
+    """离屏插件缺席但原生插件在位：界面能起，降级为警告而不是失败。"""
+    _fake_pyside(monkeypatch, tmp_path, {"libqcocoa.dylib": True})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    status, detail, hint = st._check_qt_plugins()
+    assert status == st.STATUS_WARN
+    assert "libqoffscreen.dylib" in detail and hint
+
+
+def test_no_platform_plugin_at_all_is_still_a_failure(tmp_path, monkeypatch):
+    _fake_pyside(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    status, detail, _ = st._check_qt_plugins()
+    assert status == st.STATUS_FAIL and "libqcocoa.dylib" in detail
