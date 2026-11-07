@@ -82,13 +82,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 \
-            libxcb-cursor0 fonts-noto-cjk xvfb
+            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libfontconfig1 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 \
+            libxcb-xinerama0 libxcb-xkb1 fonts-noto-cjk xvfb
       - name: 安装依赖（requirements-dev.txt 锁定版本）
         run: python -m pip install -r pc/requirements-dev.txt
       # 同一个 pytest 命令，Linux 前面加 xvfb-run：offscreen 插件在这个 runner 上
       # 会随机崩（2026-11-07 首跑在跑完后 Bus error，二跑在 57% 处 Segmentation fault，
-      # 两次都只发生在 ubuntu）。xcb 走的是真实窗口系统与字体栈，也和用户机器一致。
+      # 三跑在 xcb 下创建 QApplication 时 Aborted）。所以先单独做一次 Qt 冒烟，
+      # 把"平台插件起不来"和"某条用例失败"分成两个红点，再来跑全量。
+      - name: Qt 冒烟（Linux：xvfb 下创建 QApplication）
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: xcb
+          QT_DEBUG_PLUGINS: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" python -c "
+          from PySide6.QtWidgets import QApplication
+          app = QApplication([])
+          print('QT_OK platform=', app.platformName())
+          "
       - name: 运行 PC 全量测试（Linux：xvfb + xcb）
         if: runner.os == 'Linux'
         working-directory: pc
