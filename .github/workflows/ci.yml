@@ -1,22 +1,28 @@
-# SerialPID-Tuner 持续集成（card26）
+# SerialPID-Tuner 持续集成（card26 起步，card37 扩到三平台）
 #
-# 四档硬门槛 + 一档出包验证：
-#   1. PC 测试（常规）          —— 275 passed / 6 skipped 的基线必须一直绿
-#   2. PC 测试（长稳档）        —— 单独 job，允许失败但结果可见（continue-on-error）
-#   3. MCU 主机测试            —— gcc 编译两个运行器并执行
-#   4. ARM 交叉编译            —— 三核心模块 + 两份 HAL 示例桩，-Wall -Wextra 零告警
-#   5. 出包 + 产物新鲜度       —— 真打一次 exe，再验证 exe 晚于实现源码
+# 门槛：
+#   1. PC 测试（常规，Windows）      —— 硬门槛，基线必须一直绿
+#   2. PC 测试（跨平台观测）        —— ubuntu / macOS，首轮允许失败（观察是否测试自身带平台假设）
+#   3. PC 测试（长稳档）            —— 单独 job，允许失败但结果可见
+#   4. MCU 主机测试                 —— gcc 编译两个运行器并执行
+#   5. ARM 交叉编译                 —— 三核心模块 + 两份 HAL 示例桩，-Wall -Wextra 零告警
+#   6. 三平台出包矩阵               —— windows / ubuntu / macOS 各打各的包，产物按平台命名
+#   7. Release 分发页               —— 只在打 tag 时触发，汇总三平台产物 + 发布报告
 #
-# 第 5 档存在的理由：产物新鲜度检查如果只在没产物的环境里跑，永远只会打印"跳过"，
-# 等于没检查。CI 上真打一次包，这条判据才有效。
+# 为什么必须真打三份包：PyInstaller 不能交叉打包（Linux 的 libGL、macOS 的 .app 束
+# 与 Gatekeeper 都只能在目标平台上才暴露），Windows 打得通不代表其余两个平台能用。
+# 每份包打完都跑一次 `--selftest`，把"缺依赖 / 缺 Qt 插件"变成 CI 日志里的红字，
+# 而不是等用户报。
 #
-# CI 只出包、不发布：tag 与分发由人确认变更日志后手动做。
+# 出包不自动发版：只有 push tag（v*）才走 release job，且 Release 正文里的测试
+# 结果与哈希直接取自 docs/releases/v<ver>.md，避免页面与报告两套口径。
 
 name: CI
 
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -48,6 +54,40 @@ jobs:
         run: python -m pip install -r pc/requirements-dev.txt
       - name: 版本资源与包内版本一致
         run: python tools/make_version_info.py --check
+      - name: 运行 PC 全量测试
+        working-directory: pc
+        run: python -m pytest tests -q
+
+  pc-tests-cross:
+    name: PC 测试（跨平台观测 ${{ matrix.os }}）
+    # 说明：这条 job 是第一手跨平台证据。代码层虽然按平台分支过（config 目录、
+    # Qt 插件名、串口后端），但测试里仍可能藏着 Windows 假设（COM 排序、字体、
+    # 路径分隔符）。首轮先当观测项，红了先判断是测试假设还是实现缺陷，
+    # 修干净后再把 continue-on-error 摘掉转成硬门槛。
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pc/requirements-dev.txt
+      - name: 安装 Qt 运行库与中文字体（Ubuntu）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 \
+            libxcb-cursor0 fonts-noto-cjk
+      - name: 安装依赖（requirements-dev.txt 锁定版本）
+        run: python -m pip install -r pc/requirements-dev.txt
       - name: 运行 PC 全量测试
         working-directory: pc
         run: python -m pytest tests -q
@@ -93,10 +133,27 @@ jobs:
       - name: 交叉编译（-Wall -Wextra 零告警为门槛）
         run: pwsh scripts/verify_mcu_build.ps1 -SkipRealHal
 
-  release-artifact:
-    name: 出包与产物新鲜度
-    runs-on: windows-latest
-    timeout-minutes: 30
+  package:
+    name: 出包 ${{ matrix.platform }}
+    needs: [pc-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+            artifact: SerialPID-Tuner-v*-windows
+          - platform: linux
+            os: ubuntu-latest
+            artifact: SerialPID-Tuner-v*-linux
+          - platform: macos
+            os: macos-latest
+            artifact: SerialPID-Tuner-v*-macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,15 +161,26 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: pc/requirements-dev.txt
+      - name: 安装 Qt 运行库（Linux 打包需要，缺 libGL 时 PySide6 起不来）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 libxcb-cursor0
       - name: 安装依赖（requirements-dev.txt 锁定版本）
         run: python -m pip install -r pc/requirements-dev.txt
       - name: 源码环境启动自检
-        run: python pc/main.py --selftest --json
-      - name: 打包（scripts/build.bat 自带出包后自检）
+        run: python pc/main.py --selftest --json --out dist/selftest-src.json
+      - name: "打包（Windows：scripts\\build.bat）"
+        if: runner.os == 'Windows'
         run: cmd /c scripts\build.bat
-      - name: 产物新鲜度：exe 必须晚于实现源码
+      - name: "打包（Linux/macOS：scripts/build.sh，内含打包产物自检）"
+        if: runner.os != 'Windows'
+        run: bash scripts/build.sh
+      - name: 产物新鲜度：产物必须晚于实现源码
         run: python scripts/check_artifact_freshness.py --require
-      - name: 校验 exe 版本资源
+      - name: 校验 exe 版本资源（Windows）
+        if: runner.os == 'Windows'
         run: |
           $ver = (python tools/make_version_info.py --version).Trim()
           $quad = "$ver.0"
@@ -121,11 +189,68 @@ jobs:
           Write-Host "$($exe.Name) FileVersion=$($info.FileVersion) ProductVersion=$($info.ProductVersion) 期望=$quad"
           if ($info.FileVersion -ne $quad) { throw "FileVersion 与包内版本不符：$($info.FileVersion)" }
           if ($info.ProductVersion -ne $quad) { throw "ProductVersion 与包内版本不符：$($info.ProductVersion)" }
+      - name: 归档自检结果（按平台命名，Release 页要引用）
+        shell: bash
+        run: |
+          mkdir -p dist
+          for name in selftest-exe selftest-linux selftest-macos; do
+            if [ -f "dist/$name.json" ]; then
+              cp "dist/$name.json" "dist/selftest-${{ matrix.platform }}.json"
+              break
+            fi
+          done
+          ls -l dist
       - name: 上传产物与自检结果
         uses: actions/upload-artifact@v4
         with:
-          name: SerialPID-Tuner-windows
+          name: SerialPID-Tuner-${{ matrix.platform }}
           path: |
-            dist/*.exe
-            dist/selftest-*.json
+            dist/SerialPID-Tuner-v*.exe
+            dist/SerialPID-Tuner-v*.tar.gz
+            dist/SerialPID-Tuner-v*.zip
+            dist/SerialPID-Tuner-v*.sha256
+            dist/selftest-src.json
+            dist/selftest-${{ matrix.platform }}.json
           if-no-files-found: error
+
+  release:
+    name: Release 分发页（tag）
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 汇总三平台产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: 生成 Release 附注（下载表 + 自检摘要 + 发布报告）
+        run: |
+          ls -l dist
+          python scripts/make_release_body.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --artifacts dist \
+            --out release-body.md
+          cat release-body.md
+      - name: 挂载产物到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=()
+          for f in dist/SerialPID-Tuner-v*.exe dist/SerialPID-Tuner-v*.tar.gz \
+                   dist/SerialPID-Tuner-v*.zip dist/SerialPID-Tuner-v*.sha256 \
+                   dist/SHA256SUMS.txt dist/selftest-*.json; do
+            [ -f "$f" ] && files+=("$f")
+          done
+          echo "将上传 ${#files[@]} 个文件"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "SerialPID-Tuner $GITHUB_REF_NAME" \
+            --notes-file release-body.md \
+            --verify-tag \
+            "${files[@]}"
