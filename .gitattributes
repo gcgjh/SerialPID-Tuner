@@ -1,0 +1,8 @@
+# 行尾统一：跨平台协作时不让 git 的自动转换与编辑器各自为政。
+# .bat 被 cmd 解析，LF-only 会让 cmd 把多行拼成一条命令（表现为
+# "'st-src.json' is not recognized" 这类碎片报错），必须锁 CRLF。
+# .sh 交给 bash，必须锁 LF，否则 Windows 上写出来的脚本在 CI 里报
+# "bad interpreter: /bin/bash^M"。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf
