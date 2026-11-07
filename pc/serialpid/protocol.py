@@ -115,6 +115,78 @@ RESULT_NAMES: Dict[int, str] = {
     AckResult.REJECTED: "越界拒绝",
 }
 
+
+class PidErrorCode:
+    """ERROR 帧的 code 取值（与固件 ``mcu/Inc/pid_comm.h`` 的 ``pid_err_code_t``
+    逐项对齐，冻结；新增码必须同时改固件、本文档与黄金向量）。"""
+
+    NONE = 0x00        # 固件主动上报的良性提示
+    PARAM = 0x01       # 参数非法（NaN / Inf / 超范围）
+    PAYLOAD = 0x02     # 载荷长度与类型不符
+    TYPE = 0x03        # 未知包类型
+    NVM = 0x04         # 参数存储失败
+    STEP = 0x05        # 阶跃测试参数非法 / 忙
+    INTERNAL = 0x06    # 固件内部错误
+
+
+#: ``ERROR.code`` -> (一句话含义, 建议动作)。
+#: 用户看到的是这两段而不是裸数字（card28）：``code=0x04`` 说明"写 Flash 失败，
+#: 掉电会丢参数"，而不是让人去翻协议文档第 4 节。
+ERROR_CATALOG: Dict[int, Tuple[str, str]] = {
+    PidErrorCode.NONE: (
+        "无错误（固件主动上报的良性提示）",
+        "无需处理；若频繁出现，请把整行日志贴给开发者",
+    ),
+    PidErrorCode.PARAM: (
+        "参数非法（NaN / Inf / 超出允许范围），固件已拒绝本次下发",
+        "检查界面里的 Kp / Ki / Kd / SP 是否在允许范围内；被拒绝的值没有写入固件，"
+        "曲线会继续按旧参数运行",
+    ),
+    PidErrorCode.PAYLOAD: (
+        "载荷长度与该包类型不符，固件丢弃了这一帧",
+        "多半是上位机与固件协议版本不一致：确认双方都是协议 v1.0 后重连",
+    ),
+    PidErrorCode.TYPE: (
+        "固件不认识这个包类型",
+        "固件版本比上位机旧：升级固件，或改用界面上固件已支持的按钮",
+    ),
+    PidErrorCode.NVM: (
+        "参数写入 Flash 失败，掉电后不会保留",
+        "本次参数即时生效但重启会丢；检查 Flash 是否被写保护或已写满，"
+        "确认后重新下发一次参数",
+    ),
+    PidErrorCode.STEP: (
+        "阶跃测试参数非法，或控制器正忙",
+        "把阶跃幅值 / 保持时间调回合理区间，等当前阶跃结束后再试",
+    ),
+    PidErrorCode.INTERNAL: (
+        "固件内部错误",
+        "先点一次软复位（RESET）再试；仍复现请附上固件版本与复现步骤",
+    ),
+}
+
+
+def describe_error_code(code: int) -> Tuple[str, str]:
+    """``code`` -> (含义, 建议动作)；未知码给出可转述的说明而不是抛异常。"""
+    value = int(code) & 0xFF
+    return ERROR_CATALOG.get(
+        value,
+        (
+            f"未定义的错误码 0x{value:02X}",
+            "错误码不在已知表里，可能是固件比上位机新：把这一整行日志贴给开发者",
+        ),
+    )
+
+
+def error_line(code: int, message: str = "") -> str:
+    """把一条 ERROR 帧渲染成"是什么 + 固件原话 + 下一步"的一行文本。"""
+    value = int(code) & 0xFF
+    meaning, advice = describe_error_code(value)
+    text = f"ERROR code=0x{value:02X}（{meaning}）"
+    if message:
+        text += f"｜固件原话：{message}"
+    return f"{text}｜建议：{advice}"
+
 # 各类型固定载荷的 struct 格式（小端）；ERROR 为可变长，单独处理。
 PAYLOAD_FMT: Dict[int, str] = {
     PacketType.PONG: "<BB",
@@ -700,7 +772,7 @@ def describe_frame(frame: Frame) -> str:
             return f"{name} phase={PHASE_NAMES.get(phase, phase)} t={t_ms}ms"
         if frame.type == PacketType.ERROR:
             code, message = unpack_error(frame.payload)
-            return f"{name} code={code} msg={message}"
+            return error_line(code, message)
         if frame.type == PacketType.STEP_START:
             amplitude, hold_ms = unpack_step_start(frame.payload)
             return f"{name} amplitude={amplitude:g} hold={hold_ms}ms"

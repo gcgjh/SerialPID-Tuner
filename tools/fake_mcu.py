@@ -1,42 +1,59 @@
-"""离线 MCU 模拟器（TCP 传输，帧格式与实物串口完全一致）。
+"""离线 MCU 模拟器（TCP 薄壳，卡27 起只做通道，不再自己算控制）。
 
-用途：无硬件时让上位机完成连接、看曲线、参数下发、阶跃测试、CSV 导出全流程。
-植物模型为一阶惯性 + 比例输出，仅用于演示链路与绘图，不代表真实 PID 整定结果。
+协议会话、命令分发、阶跃状态机、PID 与被控对象都收敛到 ``serialpid.sim.engine``：
+本文件只负责监听 TCP、把收到的字节喂给引擎、把引擎输出写回 socket。
+这样"内置模拟器"和"TCP 模拟器"只有一套实现，不会再出现改了一边忘另一边。
 
-用法：
+命令行与输出格式保持不变（集成测试按子进程拉起它）::
+
     python tools/fake_mcu.py --port 9000
+
 上位机 TCP 目标填 127.0.0.1:9000。
+
+帧字节与 ``SimEngine`` 逐字节一致——两者本来就是同一个实现。
 """
 
 from __future__ import annotations
 
 import argparse
-import socket
-import struct
-import threading
-import time
-from typing import Optional
-
 import os
+import socket
 import sys
+import threading
+from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pc"))
 
 from serialpid.protocol import (  # noqa: E402
     PacketType,
-    FrameDecoder,
     encode,
-    pack_pid_set,
-    unpack_pid_ack,  # noqa: F401  (保留对称导入)
-    unpack_telemetry,  # noqa: F401
+    expected_payload_len,
+    parse_frame,
 )
+from serialpid.sim.engine import SimEngine  # noqa: E402
+from serialpid.sim.transport import SimTransport  # noqa: E402
 
-CTRL_PERIOD_S = 0.05  # 20 Hz 遥测/控制周期
-PLANT_TAU_S = 2.0      # 一阶惯性时间常数
-OUT_MIN, OUT_MAX = 0.0, 100.0
+CTRL_PERIOD_S = 0.05  # 20 Hz 遥测/控制周期（引擎默认，保留常量供外部引用）
+
+
+class _SocketOut(SimTransport):
+    """引擎输出直接落到 socket：薄壳没有"上位机侧读缓冲"，不需要再存一份。"""
+
+    def __init__(self, owner: "FakeMcu") -> None:
+        super().__init__(read_timeout=0.01)
+        self._owner = owner
+
+    def emit(self, data: bytes) -> bool:  # noqa: D401 - 与 SimTransport 同语义
+        payload = bytes(data)
+        self.bytes_to_host += len(payload)
+        # 没有客户端时也照样走 _send：它在无客户端时静默丢弃，
+        # 而测试会把 _send 换成捕获函数，不连 socket 也能验帧。
+        return self._owner._write_raw(payload)
 
 
 class FakeMcu:
+    """TCP 薄壳：监听、收发、打印；控制逻辑全部委托 ``SimEngine``。"""
+
     def __init__(self, host: str = "127.0.0.1", port: int = 9000) -> None:
         self.host = host
         self.port = port
@@ -44,100 +61,70 @@ class FakeMcu:
         self._client: Optional[socket.socket] = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._connected = False
 
-        # 控制器/植物状态
-        self.kp, self.ki, self.kd = 2.0, 0.5, 0.1
-        self.sp = 25.0
-        self.pv = 20.0
-        self.out = 0.0
-        self._integral = 0.0
-        self._last_err = 0.0
-        self._t_ms = 0
+        self._transport = _SocketOut(self)
+        self._engine = SimEngine(
+            transport=self._transport,
+            period_s=CTRL_PERIOD_S,
+            on_event=self._on_event,
+        )
 
-        # 阶跃状态
-        self._step_baseline: Optional[float] = None
-        self._step_until = 0.0
-        self._step_revert = False
+    # ---- 引擎事件 -> 原命令行输出 ---------------------------------------- #
 
-    # ---- 命令处理 ----
-
-    def _handle(self, pkt_type: int, payload: bytes) -> None:
-        if pkt_type == PacketType.PING:
-            self._send(PacketType.PONG, struct.pack("<BB", 0x10, self._status()))
-        elif pkt_type == PacketType.PID_SET:
-            kp, ki, kd, sp = struct.unpack("<4f", payload)
-            self.kp, self.ki, self.kd, self.sp = kp, ki, kd, sp
-            ack = struct.pack("<4fB", kp, ki, kd, sp, 0)
-            self._send(PacketType.PID_ACK, ack)
-            print(f"[PID_SET] Kp={kp:.3f} Ki={ki:.3f} Kd={kd:.3f} SP={sp:.2f}")
-        elif pkt_type == PacketType.SP_SET:
-            (self.sp,) = struct.unpack("<f", payload)
-            print(f"[SP_SET] SP={self.sp:.2f}")
-        elif pkt_type == PacketType.STEP_START:
-            amplitude, hold_ms = struct.unpack("<fI", payload)
-            self._step_baseline = self.sp
-            self.sp = self.sp + amplitude
-            self._step_until = time.monotonic() + hold_ms / 1000.0
-            self._step_revert = hold_ms > 0
-            self._send(PacketType.STEP_EVENT, struct.pack("<BI", 1, self._t_ms))
-            print(f"[STEP_START] 幅值={amplitude:.2f} 保持={hold_ms}ms -> SP={self.sp:.2f}")
-        elif pkt_type == PacketType.STEP_STOP:
-            self._revert_step()
-            self._send(PacketType.STEP_EVENT, struct.pack("<BI", 0, self._t_ms))
+    @staticmethod
+    def _on_event(name: str, fields: dict) -> None:
+        if name == "PID_SET":
+            print(
+                f"[PID_SET] Kp={fields['kp']:.3f} Ki={fields['ki']:.3f} "
+                f"Kd={fields['kd']:.3f} SP={fields['sp']:.2f}"
+            )
+        elif name == "SP_SET":
+            print(f"[SP_SET] SP={fields['sp']:.2f}")
+        elif name == "STEP_START":
+            print(
+                f"[STEP_START] 幅值={fields['amplitude']:.2f} "
+                f"保持={fields['hold_ms']}ms -> SP={fields['sp']:.2f}"
+            )
+        elif name == "STEP_STOP":
             print("[STEP_STOP] 停止")
-        elif pkt_type == PacketType.RESET:
-            self.pv, self.out = 20.0, 0.0
-            self._integral, self._last_err = 0.0, 0.0
-            self._revert_step()
-            self._send(PacketType.PONG, struct.pack("<BB", 0x10, self._status()))
+        elif name == "RESET":
             print("[RESET] 状态复位")
-
-    def _revert_step(self) -> None:
-        if self._step_baseline is not None:
-            self.sp = self._step_baseline
-        self._step_baseline = None
-        self._step_revert = False
-
-    def _status(self) -> int:
-        if self._step_baseline is not None:
-            return 2
-        return 1
-
-    # ---- 周期控制 + 遥测 ----
-
-    def _control_step(self, dt: float) -> None:
-        # 阶跃到时回退
-        if self._step_revert and time.monotonic() >= self._step_until:
-            self._revert_step()
-            self._send(PacketType.STEP_EVENT, struct.pack("<BI", 2, self._t_ms))
+        elif name == "STEP_DONE":
             print("[STEP_EVENT] 完成")
 
-        err = self.sp - self.pv
-        # 简易 PID（含积分限幅），仅演示用
-        self._integral += err * dt
-        self._integral = max(-50.0, min(50.0, self._integral))
-        deriv = (err - self._last_err) / dt if dt > 0 else 0.0
-        self._last_err = err
-        self.out = self.kp * err + self.ki * self._integral + self.kd * deriv
-        self.out = max(OUT_MIN, min(OUT_MAX, self.out))
+    # ---- 收发 ------------------------------------------------------------ #
 
-        # 一阶惯性植物
-        self.pv += dt * (self.sp - self.pv) / PLANT_TAU_S
-        self._t_ms += int(dt * 1000)
-
-        payload = struct.pack("<I4f", self._t_ms, self.sp, self.pv, self.out, err)
-        self._send(PacketType.TELEMETRY, payload)
+    def _handle(self, pkt_type: int, payload: bytes) -> None:
+        """处理一条命令（测试可直接调用，不必连 socket）。"""
+        expected = expected_payload_len(pkt_type)
+        if expected is not None and len(payload) != expected:
+            print(f"[WARN] 载荷解析失败：type=0x{pkt_type:02X} 期望 {expected}B，实收 {len(payload)}B")
+            return
+        self._engine.handle_frame(pkt_type, payload)
 
     def _send(self, pkt_type: int, payload: bytes) -> None:
-        if self._client is None:
+        """把一帧写到当前客户端（测试可替换成捕获函数，不连 socket）。"""
+        raw = encode(pkt_type, payload)
+        client = self._client
+        if client is None:
             return
         try:
             with self._lock:
-                self._client.sendall(encode(pkt_type, payload))
+                client.sendall(raw)
         except OSError:
             pass
 
-    # ---- 服务循环 ----
+    def _write_raw(self, raw: bytes) -> bool:
+        """引擎给出完整帧字节：解回类型/载荷后走 ``_send``（保持原接口）。"""
+        try:
+            frame = parse_frame(raw)
+        except ValueError:
+            return False
+        self._send(frame.type, frame.payload)
+        return True
+
+    # ---- 服务循环 -------------------------------------------------------- #
 
     def serve(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -147,9 +134,6 @@ class FakeMcu:
         self._sock.settimeout(0.2)
         print(f"fake_mcu 监听 {self.host}:{self.port}（Ctrl+C 退出）")
 
-        ctrl = threading.Thread(target=self._control_loop, daemon=True)
-        ctrl.start()
-
         while not self._stop.is_set():
             try:
                 client, addr = self._sock.accept()
@@ -158,22 +142,17 @@ class FakeMcu:
             print(f"上位机接入: {addr}")
             self._client = client
             self._client.settimeout(0.2)
-            self._read_loop()
+            self._connected = True
+            self._engine.start()
+            try:
+                self._read_loop()
+            finally:
+                self._connected = False
+                self._engine.stop()
+                self._client = None
             print("上位机断开")
-            self._client = None
-
-    def _control_loop(self) -> None:
-        last = time.monotonic()
-        while not self._stop.is_set():
-            now = time.monotonic()
-            dt = min(now - last, 0.2)
-            last = now
-            if self._client is not None:
-                self._control_step(dt)
-            time.sleep(CTRL_PERIOD_S)
 
     def _read_loop(self) -> None:
-        dec = FrameDecoder()
         assert self._client is not None
         while not self._stop.is_set():
             try:
@@ -184,18 +163,22 @@ class FakeMcu:
                 break
             if not data:
                 break
-            for frame in dec.feed(data):
-                try:
-                    self._handle(frame.type, frame.payload)
-                except struct.error as exc:
-                    print(f"[WARN] 载荷解析失败: {exc}")
+            self._engine.feed(data)
 
     def stop(self) -> None:
         self._stop.set()
+        self._connected = False
+        self._engine.stop()
         if self._client:
-            self._client.close()
+            try:
+                self._client.close()
+            except OSError:
+                pass
         if self._sock:
-            self._sock.close()
+            try:
+                self._sock.close()
+            except OSError:
+                pass
 
 
 def main() -> None:
