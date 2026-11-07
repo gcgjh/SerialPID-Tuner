@@ -102,7 +102,10 @@ def collect_artifacts(artifacts_dir: Path, version: str) -> List[Dict[str, str]]
             continue
         if f"v{version}" not in entry.name and f"v{version}." not in entry.name:
             continue
-        if entry.suffix == ".json":
+        # 旁证文件不是产物：自检 JSON、``.sha256`` 校验行、说明与校验清单。
+        # 少排这一行，Linux/macOS 的 ``xxx.tar.gz.sha256`` 会以「0 KB 的产物」出现在
+        # 下载表里，还会被写进 SHA256SUMS.txt（用户照着校验多出一个不存在的文件）。
+        if entry.suffix in {".json", ".sha256", ".md", ".txt"}:
             continue
         rows.append(
             {

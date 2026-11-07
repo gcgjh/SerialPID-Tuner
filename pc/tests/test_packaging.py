@@ -336,6 +336,27 @@ def test_release_body_writes_sha256sums_that_verify(tmp_path):
         assert digest == actual, f"{name} 的哈希行与实际不符"
 
 
+def test_release_body_excludes_sidecar_hash_files(tmp_path):
+    """Linux/macOS 出包会带 ``*.sha256``；它不该作为「产物」出现在下载表里。"""
+    module = _load(SCRIPTS / "make_release_body.py", "card43_release_body_sidecars")
+    version = _version()
+    dist = _fake_artifacts(tmp_path, version)
+    for name in (
+        f"SerialPID-Tuner-v{version}-linux-x86_64.tar.gz.sha256",
+        f"SerialPID-Tuner-v{version}-macos-arm64.zip.sha256",
+    ):
+        (dist / name).write_bytes(b"hash  filename\n")
+    out = tmp_path / "body.md"
+    assert module.main(["--version", version, "--artifacts", str(dist), "--out", str(out)]) == 0
+
+    body = out.read_text(encoding="utf-8")
+    download = body.split("## 下载", 1)[1].split("## 首次运行", 1)[0]
+    assert ".sha256" not in download, "校验行文件不能混进下载表"
+    sums = (dist / "SHA256SUMS.txt").read_text(encoding="utf-8").splitlines()
+    assert len(sums) == 3, "SHA256SUMS.txt 只列三个真产物"
+    assert not any(line.endswith(".sha256") for line in sums)
+
+
 def test_release_body_without_artifacts_says_so_explicitly(tmp_path):
     module = _load(SCRIPTS / "make_release_body.py", "card37_release_body_empty")
     dist = tmp_path / "dist"
