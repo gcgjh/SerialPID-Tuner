@@ -223,7 +223,7 @@ curve: ReactionCurve = estimate_reaction_curve(times, sp, pv,
 ## 5. 测试
 
 ```powershell
-# 安装开发依赖（含 pytest / pyinstaller / pillow）
+# 安装开发依赖（pytest / pyinstaller / pillow 均为锁定版本）
 pip install -r pc\requirements-dev.txt
 
 cd pc
@@ -231,6 +231,8 @@ pytest tests -q
 ```
 
 - `test_protocol.py`：编解码、CRC 标准向量、往返一致性。
+- `test_version_consistency.py`：版本号单一来源——包内 `__version__`、版本资源、
+  CHANGELOG 最高版本、README 当前版本行必须一致。
 - `test_step_test.py`：上升 / 下降沿、超调 / 上升时间 / 调节时间 / 不收敛、
   状态机跳变、CSV 导出。
 - `test_zn_tuning.py`：闭环 / 开环已知公式值、非法输入、反应曲线辨识。
@@ -253,7 +255,10 @@ pytest tests -q
 - **图标**：`tools/make_icon.py` 用 Pillow 生成多尺寸 `assets/app.ico` 与
   `assets/app.png`；打包前脚本会先调用一次。
 - **版本资源**：`scripts/version_info.txt` 是 PyInstaller `--version-file` 读取的
-  VSVersionInfo；版本号改动后请与 README、包内版本同步。
+  VSVersionInfo，**不要手改**——它由 `tools/make_version_info.py` 从
+  `pc/serialpid/__init__.py` 的 `__version__` 生成，打包脚本每次都会先重新生成一遍。
+  版本号只改 `__version__` 一处；`pc/tests/test_version_consistency.py` 会检查
+  版本资源、README 与 CHANGELOG 是否跟着对齐。
 - **窗口模式**：`--windowed --onefile`，最终用户双击运行不弹控制台。
 - **临时目录**：`--workpath` / `--distpath` 指向系统临时目录（ASCII 路径），
   打包完成后再把产物拷回仓库 `dist/`。部分环境下仓库路径含中文 / 非 ASCII 字符时，
@@ -271,18 +276,48 @@ scripts\build.bat          # Windows
 bash scripts/build.sh      # Linux / macOS
 ```
 
-产物在 `dist/`。`.gitignore` 忽略 `build/`、`dist/`、`*.exe`、`*.pkg`。
+产物：`dist/SerialPID-Tuner-v<版本>.exe`（版本化产物）与 `dist/SerialPID-Tuner.exe`
+（稳定名副本，供文档 / 旧链接引用）。`.gitignore` 忽略 `build/`、`dist/`、`*.exe`、`*.pkg`。
 本项目**不使用 PyInstaller spec 作为构建入口**：onefile / windowed / 图标 / 版本资源 /
 附加数据 / 模块搜索路径等参数全部内联在 `scripts/build.bat` / `build.sh` 里，避免脚本
 与 spec 两处维护；命令行构建时 PyInstaller 会在工作目录自动落一份同名 `*.spec`，
 属构建副产物（已在忽略规则内），不是需要维护的构建文件。
 
-## 7. 已知边界与后续可做项
+发布链路：
 
-- 预设管理 `PresetManager` 已落地，但预设 UI 尚未接入主窗口（见
+```powershell
+..\.venv\Scripts\python.exe scripts\release.py        # 测试 → 自检 → 打包 → 校验 → 冒烟 → 报告
+..\.venv\Scripts\python.exe scripts\check_artifact_freshness.py --require
+```
+
+`release.py` 的报告写到 `docs/releases/v<版本>.md`（版本、commit、测试结果、自检结果、
+体积、SHA-256、新鲜度与冒烟结论）。它**不自动 tag、不自动上传**：这两步必须在人确认
+变更日志之后做。
+
+## 7. 持续集成
+
+`.github/workflows/ci.yml` 五个 job，push / PR / 手动触发：
+
+| job | 平台 | 内容 | 门槛 |
+| --- | --- | --- | --- |
+| `pc-tests` | windows-latest | `pytest tests -q`（offscreen） | 必须绿 |
+| `pc-tests-long-run` | windows-latest | `pytest tests/test_long_run.py --long-run` | 允许失败（`continue-on-error`），但结果必须可见 |
+| `mcu-host-tests` | ubuntu-latest | `pwsh mcu/test/run_host_test.ps1` | 两个运行器 exit 0 |
+| `arm-cross-compile` | ubuntu-latest | `pwsh scripts/verify_mcu_build.ps1 -SkipRealHal` | 零告警 |
+| `release-artifact` | windows-latest | 打包 + `check_artifact_freshness.py --require` + 版本资源校验 | 必须绿，产物可下载 |
+
+为什么长稳单独一档且允许失败：它跑的是时间轴回绕 / 复位这类边界场景，偶尔在共享
+CPU 上抖动超时会假失败；把它设成"必须绿"只会逼人重试到绿，反而失去信号。
+为什么出包单独一档：产物新鲜度检查在没有 dist/ 的环境里只会打印"跳过"，等于没检查。
+
+## 8. 已知边界与后续可做项
+
+- 预设管理 `PresetManager` 已接入参数面板（保存 / 加载 / 管理，加载只填界面不下发，
+  card13；第四轮 card20 把三个动作收进「预设…」菜单按钮，见
   [PC_TOOLS_API.md](PC_TOOLS_API.md) 第 4 节）。
-- `log_panel.py` 与 `step_test.py` 目前各自手写 CSV，表头 / 小数位口径待统一到
-  `csv_export.py`。
+- CSV 导出：`log_panel.py` 已统一到 `csv_export.export_telemetry`（card12）；
+  `step_test.export_csv` 仍是自己手写的 writer（表头 `t_ms,sp,pv,out,err`、
+  `utf-8-sig`、四位小数），与模块口径是否一致尚无交叉验证用例。
 - 反应曲线自动辨识对噪声敏感，必要时把 `step_index` 显式传入，或增大
   `smooth_win`。
 - 打包时若 PySide6 / pyqtgraph 出现缺插件，用 `--collect-submodules pyqtgraph`

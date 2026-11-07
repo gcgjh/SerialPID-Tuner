@@ -2,7 +2,48 @@
 
 本项目遵循语义化版本思路，格式参考 Keep a Changelog。
 
+版本号的唯一来源是 `pc/serialpid/__init__.py` 的 `__version__`；本文件的最高版本、
+`README.md` 的当前版本行与 `scripts/version_info.txt` 都由它派生，
+`pc/tests/test_version_consistency.py` 负责在测试里守住这条。
+
 ## [Unreleased]
+
+（暂无。下一轮改动先写在这里，发版时整体提升为 `## [X.Y.Z] - 日期`。）
+
+## [0.2.0] - 2026-11-07
+
+第四、五轮的仿真 / 端口诊断 / 启动自检接入，以及本轮的发布工程收口。
+PC 测试基线 `281 passed`（含长稳档），MCU 双测试器与 ARM 交叉编译零告警。
+
+### 新增
+
+- **内置仿真设备面板**：`sim/plant.py`（一阶惯性植物）、`sim/engine.py`（协议会话、
+  命令分发、阶跃状态机）、`gui/sim_panel.py`（7 参数 / 5 预设、默认折叠）。进程内即可
+  闭环演示，不必再另起 `tools/fake_mcu.py` 的 TCP 模拟器。
+- **串口端口诊断**：`port_scan.py` 提供三态枚举结果（有设备 / 无设备 / 枚举失败），
+  带超时保护（驱动卡死时有上限），可生成一段能直接粘贴给开发者的诊断文本；界面端口
+  下拉不再塞假 `COM1` 占位。
+- **启动自检**：`selftest.py` 八项检查（Python 版本、pyserial、串口平台后端、Qt 平台
+  插件、配置目录可写、日志目录可写、图标资源、协议帧往返），三态报告
+  （pass / warn / fail）+ JSON 与文本日志落盘 + 无控制台 exe 的
+  `--selftest --out <文件>` 出口；主窗口启动横幅只在失败 / 警告时显示，不占常态高度。
+- **发布工程**（本轮）：
+  - `__version__` 作为版本单一来源，`tools/make_version_info.py` 从它生成
+    `scripts/version_info.txt`，打包脚本在打包前重新生成；
+  - GitHub Actions 五档：PC 常规测试、PC 长稳档（允许失败但可见）、MCU 主机测试、
+    ARM 交叉编译（`-Wall -Wextra` 零告警）、出包 + 产物新鲜度；
+  - `scripts/check_artifact_freshness.py`：dist/ 里的 exe 早于任一实现源码即判失败
+    （测试 / 桩 / 文档不计入，避免误报）；
+  - `scripts/release.py`：测试 → 自检 → 打包 → 校验 → 冒烟 → 报告，一条命令串完，
+    报告归档到 `docs/releases/v<版本>.md`（含 commit、测试结果、产物哈希）。
+
+### 变更
+
+- 打包依赖锁定版本：PyInstaller 6.22.3 / Pillow 12.0.0 / pytest 9.2.0；
+  打包脚本改为 `pip install -r pc/requirements-dev.txt`，不再裸装。
+- 产物名带版本号：`dist/SerialPID-Tuner-v0.2.0.exe`，同时保留稳定名副本
+  `dist/SerialPID-Tuner.exe` 供文档引用。
+- 版本号三处不一致（版本资源 1.0.0.0 / 本文件 0.1.0 / README v0.1）收敛为 `0.2.0`。
 
 ### 修复与文档一致性（card5 二轮复核，2026-11-05）
 
@@ -24,7 +65,7 @@
 - `.gitignore` 删除「spec 保留入库、故不忽略」的失效注释，改为按构建副产物忽略
   `*.spec`：PyInstaller 命令行构建会在工作目录自动生成同名 spec，不入库。
 
-### 第三轮修复与接入（card11–card15，2026-11-07)
+### 第三轮修复与接入（card11–card15，2026-11-07）
 
 - 绘图时间轴：32 位毫秒回绕按 `2^32` 补偿继续；会话中途复位判为新会话重开；
   连接建立 / 检测到复位 / 手动清空统一走 `restart_timeline()`。长稳中
@@ -36,11 +77,12 @@
 - HAL 集成示例与 NVM 示例纳入编译验证：最小桩环境 + 真实 HAL 头交叉核对，
   `scripts/verify_mcu_build.ps1` 共 15 项零告警；接线文档补充 HAL 符号清单。
 
-### 计划中（v0.2 / v0.3）
+### 计划中（v0.3）
 
-- 曲线缩放复位、多曲线显隐切换。
-- 链路质量统计（丢帧率、遥测周期抖动）与错误日志落盘；独立应答超时看门狗。
-- 实物烧录联调；Release tag、截图 / 接线图、开源许可证定稿。
+- 真机联调：烧录、上板自测序列、故障排查树（card29）。
+- 通信可靠性：主动心跳、链路质量统计、ERROR 码中文映射、断线原因分类（card28）。
+- 仿真生态：故障注入、录制回放、批量扫参（card27）。
+- 用户可见面：截图素材、内置帮助、关于对话框（card30）。
 
 ## [0.1.0] - 2026-11-05
 

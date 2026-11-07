@@ -6,8 +6,10 @@ Ziegler-Nichols 辅助整定、CSV 曲线导出；MCU 侧提供零 HAL 依赖的
 应用层，以及 STM32 HAL 集成示例。
 
 > 协议字节布局已冻结，见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（v1.0）。
-> 当前为 **v0.1 离线闭环验收版**：PC 全链路 + MCU 主机侧离线测试通过；
+> 当前版本：**0.2.0**（离线闭环验收版）：PC 全链路 + MCU 主机侧离线测试通过；
 > 实物烧录联调列入 v0.3。
+> 版本号的唯一来源是 `pc/serialpid/__init__.py` 的 `__version__`，本行与
+> [`docs/CHANGELOG.md`](docs/CHANGELOG.md)、exe 文件属性都由它派生。
 
 ## 功能
 
@@ -69,20 +71,38 @@ Windows：
 
 ```powershell
 scripts\build.bat
-# 产物：dist\SerialPID-Tuner.exe（单文件、无控制台、带图标与版本信息）
+# 产物：dist\SerialPID-Tuner-v0.2.0.exe（单文件、无控制台、带图标与版本信息）
+#       dist\SerialPID-Tuner.exe（稳定名副本，供文档引用）
 ```
 
 Linux / macOS：
 
 ```bash
 bash scripts/build.sh
-# 产物：dist/SerialPID-Tuner
+# 产物：dist/SerialPID-Tuner-v0.2.0、dist/SerialPID-Tuner
 ```
 
-打包依赖见 [`pc/requirements-dev.txt`](pc/requirements-dev.txt)（追加 pyinstaller / pillow / pytest）。
+打包依赖见 [`pc/requirements-dev.txt`](pc/requirements-dev.txt)：PyInstaller / Pillow /
+pytest 均**锁定版本**，脚本用 `pip install -r` 安装而不是裸装，保证同一份源码换个时间
+打出来的包一致。版本号取自 `pc/serialpid/__init__.py` 的 `__version__`，打包脚本会先把
+`scripts/version_info.txt` 重新生成一遍——exe 属性里的版本不会落后于源码。
 
 构建脚本会优先使用项目环境（`../.venv`）里的解释器，找不到才回退 `PATH` 中的 `python`，
 并在日志第一行打印实际使用的解释器路径；依赖已装好时跳过安装，不污染全局环境。
+
+### 发布（测试 → 自检 → 打包 → 校验 → 冒烟 → 报告）
+
+```powershell
+..\.venv\Scripts\python.exe scripts\release.py
+# 报告归档：docs\releases\v0.2.0.md（版本 / commit / 测试结果 / 产物 SHA-256）
+```
+
+发布脚本**不自动打 tag、不自动上传**：变更日志与截图由人确认后再发。
+只想查"exe 有没有落后源码"时单独跑：
+
+```powershell
+..\.venv\Scripts\python.exe scripts\check_artifact_freshness.py --require
+```
 
 ## 测试
 
@@ -140,7 +160,10 @@ SerialPID-Tuner/
 │       ├── config.py             # 参数输入范围配置（config.json 读写与回落）
 │       ├── frame_log.py           # 未知类型帧聚合计数日志
 │       ├── preset_manager.py     # PID 预设 JSON 管理
-│       └── gui/                  # 主窗口 / 曲线 / 参数 / 阶跃 / Z-N / 日志面板
+│       ├── port_scan.py          # 串口端口三态诊断（超时保护 + 可粘贴诊断文本）
+│       ├── selftest.py           # 启动自检与依赖诊断（八项三态报告）
+│       ├── sim/                  # 进程内仿真：植物 / 协议会话 / 传输
+│       └── gui/                  # 主窗口 / 曲线 / 参数 / 阶跃 / Z-N / 日志 / 仿真面板
 ├── mcu/                         # 固件（协议层 / 算法层 / 应用层 + HAL 示例）
 │   ├── Inc/  Src/
 │   │   ├── pid_comm.*            # 协议解析 / 组帧 / CRC / 环形缓冲（无 HAL）
@@ -152,8 +175,10 @@ SerialPID-Tuner/
 ├── tools/
 │   ├── fake_mcu.py               # 离线 TCP 模拟器
 │   ├── gen_protocol_vectors.py   # 从 PC 协议生成 MCU 黄金向量
-│   └── make_icon.py              # 生成应用图标
-├── scripts/                      # 一键打包脚本与 Windows 版本资源
+│   ├── make_icon.py              # 生成应用图标
+│   └── make_version_info.py      # 从 __version__ 生成 Windows 版本资源
+├── scripts/                      # 打包 / 发布 / 产物校验脚本与 Windows 版本资源
+├── .github/workflows/ci.yml      # 五档 CI：PC / 长稳 / MCU / ARM / 出包
 ├── assets/                       # 图标等随包资源
 └── docs/
     ├── PROTOCOL.md               # 冻结协议基准 v1.0
@@ -164,6 +189,8 @@ SerialPID-Tuner/
     ├── ITERATION.md              # 迭代路线与风险
     ├── TEST_REPORT.md            # 验收测试报告
     ├── BUGS.md                   # 已知问题与限制清单
+    ├── RELEASE_CHECKLIST.md      # 发布前检查清单
+    ├── releases/                 # 每版本一份发布报告（release.py 生成）
     └── CHANGELOG.md              # 变更记录
 ```
 
@@ -181,10 +208,11 @@ SerialPID-Tuner/
 
 ## 路线图
 
-- **v0.1 基础闭环**：协议冻结、PC 通信 / GUI / 模拟器、MCU 协议与算法主机测试 —— 当前。
-- **v0.2 调参增强**：预设管理已提前接入（保存 / 加载 / 删除 / 重命名，加载只填界面不下发）；
-  曲线交互增强、链路质量统计、错误日志落盘。
-- **v0.3 发布版**：实物烧录联调、打包验收、截图 / 接线图完善、Release 发布。
+- **v0.1 基础闭环**（已完成）：协议冻结、PC 通信 / GUI / 模拟器、MCU 协议与算法主机测试。
+- **v0.2 离线增强与发布工程**（当前）：内置仿真面板、端口诊断、启动自检、预设管理接入；
+  版本号单一来源、五档 CI、一键发布脚本与产物新鲜度判据。
+- **v0.3 可靠性 + 真机**：主动心跳与链路质量统计、仿真故障注入 / 录制回放、
+  实物烧录联调与上板自测序列、截图与内置帮助。
 
 详见 [`docs/ITERATION.md`](docs/ITERATION.md)。
 
