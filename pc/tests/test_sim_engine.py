@@ -225,7 +225,12 @@ def test_inprocess_channel_through_comm_core():
         assert _wait(lambda: engine.snapshot()["step_baseline"] is None, 1.0)
         assert _wait(lambda: len([1 for t, _ in frames if t == PacketType.PONG]) >= 2, 1.0)
         assert engine.snapshot()["sp"] == pytest.approx(DEFAULT_SP)
-        assert engine.snapshot()["pv"] == pytest.approx(20.0)
+        # 复位后 PV 要靠对象模型收敛回环境温度，不是复位那一瞬间就等于 20.0：
+        # macOS runner 上引擎节拍更快，读到 19.857 这种"正在收敛"的值（2026-11-07
+        # 跨平台 job 就红在这一行）。等它回到 ±0.3 内再断言。
+        assert _wait(lambda: abs(engine.snapshot()["pv"] - 20.0) <= 0.3, 2.0), (
+            f"复位后 PV 未回到 20 附近：{engine.snapshot()['pv']}"
+        )
 
         assert errors == [], f"通信错误：{errors}"
         assert connected and connected[0][0] is True
