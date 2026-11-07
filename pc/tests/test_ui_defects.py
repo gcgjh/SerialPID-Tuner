@@ -290,7 +290,7 @@ def test_main_window_survives_malformed_and_unknown_storm(tmp_path, monkeypatch)
         for length in (0, 1, 3, 4, 15, 16, 18):
             win._on_frame(pkt_type, bytes(length))
     assert win._parse_errors == 28
-    assert win._parse_stat.text() == "解析异常 28"
+    assert win._parse_stat.text() == "坏帧 28"
     text = win._log._view.toPlainText()
     # 卡8：坏帧改为按「帧类型 + 错误原因」聚合，日志里是分类首行而不再是流水账
     assert "解析异常 type=0x20" in text
@@ -414,7 +414,7 @@ def test_bad_frame_storm_keeps_log_bounded(tmp_path, monkeypatch):
     assert added <= 15, f"1000 个坏帧新增 {added} 行日志"
     # 状态栏计数照常逐条累加（职责与日志聚合分开）
     assert win._parse_errors == 1000
-    assert win._parse_stat.text() == "解析异常 1000"
+    assert win._parse_stat.text() == "坏帧 1000"
 
     # 上限保留：超出后丢弃最旧行，不阻塞写入
     for i in range(3000):
@@ -448,4 +448,4 @@ def test_clear_log_resets_aggregator_but_keeps_status_counter(tmp_path, monkeypa
     assert win._unknown_logger.stats() == {}
     # 状态栏是「本机开机以来发生过多少次」的语义，不随清空日志归零
     assert win._parse_errors == 500
-    assert win._parse_stat.text() == "解析异常 500"
+    assert win._parse_stat.text() == "坏帧 500"
