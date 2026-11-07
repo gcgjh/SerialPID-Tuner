@@ -1,8 +1,16 @@
 # -*- coding: utf-8 -*-
 """历史遥测曲线导出 CSV（供 Origin / Excel / Python 分析）。
 
-与 GUI 的约定（见 docs/TASKS.md）：首行必须是表头，默认列顺序
-``t_ms,SP,PV,OUT,err``；默认编码 UTF-8 **带 BOM**（Excel 双击不乱码）。
+**唯一实现约定（card12）**：全仓库的 CSV 导出只有这一套。GUI（日志面板
+「导出 CSV」）只负责"取样本 + 弹保存框"，格式、编码、精度全部落在这里；
+不要再在界面回调里自己 ``csv.writer`` 拼字符串 —— 两套实现会各自演化，
+导致"按钮导出的和脚本导出的不一样"，而测试只覆盖其中一套。
+
+导出格式（固定，不要各处不同）：
+    * 首行表头 ``t_ms,SP,PV,OUT,err``（大写列名）；
+    * 数值 **六位小数**（``{:.6f}``），``t_ms`` 为整数；
+    * 编码 UTF-8 **带 BOM**（Excel 双击不乱码）；
+    * 换行 CRLF（``csv.writer`` 默认 excel dialect），行列分隔符固定。
 
 样本来源可以是：
     * ``TelemetrySample`` 之类对象（属性 ``t_ms/sp/pv/out/err``，大写 ``SP/PV/OUT`` 亦识别）；
@@ -11,9 +19,12 @@
 
 示例::
 
-    from serialpid.csv_export import export_csv
+    from serialpid.csv_export import export_csv, export_telemetry
     export_csv(buffer.samples(), "run_20261105.csv",
                metadata={"port": "COM3", "baud": 115200, "Kp": 2.0})
+
+    # GUI 用它：样本对象直接交给它，界面不碰格式
+    export_telemetry(buffer.samples(), path)
 
     # 流式落盘（长时间记录，边收边写）
     with CsvWriter("long_run.csv") as w:
@@ -256,6 +267,40 @@ def export_csv(
             except OSError:
                 pass
     return rows
+
+
+# ---------------------------------------------------------------------------
+# GUI 唯一入口：遥测样本 → 通用元组 → export_csv
+# ---------------------------------------------------------------------------
+
+
+def telemetry_rows(samples: Iterable[Any]) -> List[Tuple[Any, Any, Any, Any, Any]]:
+    """把遥测样本统一成 ``(t_ms, SP, PV, OUT, err)`` 元组序列。
+
+    界面拿到的可能是 ``TelemetrySample`` 对象、字典或元组；这里一次性归一，
+    后续格式化只走 ``export_csv`` 一条路，界面不再自己拼字符串。
+    """
+    rows: List[Tuple[Any, Any, Any, Any, Any]] = []
+    for index, sample in enumerate(samples):
+        try:
+            rows.append(tuple(_extract(sample, field) for field in DEFAULT_FIELDS))
+        except CsvExportError as exc:
+            raise CsvExportError(f"第 {index + 1} 条样本不合法：{exc}") from exc
+    return rows
+
+
+def export_telemetry(
+    samples: Iterable[Any],
+    path: Union[str, os.PathLike[str]],
+    **kwargs: Any,
+) -> int:
+    """遥测曲线导出（GUI「导出 CSV」按钮调用的唯一函数）。
+
+    等价于 ``export_csv(telemetry_rows(samples), path, **kwargs)``：
+    六位小数、UTF-8 带 BOM、列序 ``t_ms,SP,PV,OUT,err``、原子写。
+    返回写入的数据行数（不含表头）。
+    """
+    return export_csv(telemetry_rows(samples), path, **kwargs)
 
 
 # ---------------------------------------------------------------------------

@@ -95,6 +95,8 @@ STM32 GND       ─────────  转换器 GND
 - [ ] 固件接收中断已开启；ORE 溢出错误回调里 Abort + 重挂接收（见示例
       `HAL_UART_ErrorCallback`），避免“能发不能收”。
 - [ ] 先用模拟器（TCP 127.0.0.1:9000）确认上位机链路正常，再接实物串口。
+- [ ] 改过 HAL 集成示例后跑一次 `scripts/verify_mcu_build.ps1`（见第 7 节），
+      确认示例仍能编过、且没有引入告警。
 
 ## 6. 常见接线问题
 
@@ -105,3 +107,95 @@ STM32 GND       ─────────  转换器 GND
 | 能下发、收不到回包 | 固件未开接收中断；接收被 ORE 打断；RX 未接 | 检查中断与错误回调；核对 RX 接线 |
 | 曲线削顶 / 饱和 | 传感器量程不足或输出限幅 | 标定量程；检查执行器与驱动上限 |
 | 模拟器正常、实物不通 | 只验了 TCP，串口硬件链路未通 | 按第 5 节清单逐项排查 |
+
+## 7. HAL 集成示例：符号清单与编译验证
+
+两份示例（`mcu/Src/main_example.c`、`mcu/Src/pid_nvm_stm32_example.c`）**不是**库的一部分，
+它们是"照抄进 CubeMX 工程"的接线图。也正因如此，它们以前不在仓库的编译验证范围里——
+一旦 HAL 宏改名、函数签名变化，用户照抄时会卡在编译错误上，还以为是自己的工程配置坏了。
+本节把这件事闭合：示例进入每次回归的 ARM 编译验证，并把"需要哪些 HAL 符号"列清楚。
+
+### 7.1 一份示例、两种编译环境
+
+| 环境 | 头文件来源 | 怎么触发 |
+| --- | --- | --- |
+| 你的 CubeMX 工程 | CubeMX 生成的 `main.h`（内含真实 HAL） | 什么都不用定义，粘进去即可 |
+| 本仓库回归 | `mcu/stubs/stm32_hal_stub.h`（**只有声明与类型，没有实现**） | 脚本传 `-DPID_HAL_STUB=1` |
+
+文件头里有三态宏 `PID_HAL_STUB`：不定义=自动探测（有 `main.h` 就用真实的，没有就用桩），
+`1`=强制桩，`0`=强制真实 HAL。桩环境**只用于编译**，不能链接、不能运行——它刻意不提供任何
+函数体，就是为了避免"示例看起来跑通了"的错觉。
+
+### 7.2 逐项核对清单（对着你的 CubeMX 工程勾）
+
+| 符号 | 类别 | 示例中的用途 |
+| --- | --- | --- |
+| `USART1` | 实例宏 | 判断 `huart->Instance` 是哪个串口 |
+| `UART_HandleTypeDef` / `TIM_HandleTypeDef` | 类型 | 外设句柄 |
+| `HAL_UART_Transmit` | 函数 | BSP 发帧（轮询，20ms 超时） |
+| `HAL_UART_Receive_IT` | 函数 | 挂 1 字节接收中断 |
+| `HAL_UART_AbortReceive_IT` | 函数 | 错误回调里打断接收状态机后重挂 |
+| `__HAL_UART_CLEAR_OREFLAG` / `NEFLAG` / `FEFLAG` | 宏 | 清溢出/噪声/帧错误标志 |
+| `HAL_GetTick` | 函数 | **默认毫秒时基**（SysTick） |
+| `TIM6` + `HAL_TIM_Base_Start_IT` | 实例宏 / 函数 | 仅 `PID_EXAMPLE_USE_TIM6=1` 时需要 |
+| `HAL_FLASH_Unlock` / `Lock` | 函数 | NVM 擦写临界区 |
+| `HAL_FLASHEx_Erase` + `FLASH_EraseInitTypeDef` | 函数 / 类型 | 擦页（F1）或擦扇区（F4/H7） |
+| `HAL_FLASH_Program` | 函数 | 写半字 / 字 / 32 字节 flashword |
+| `HAL_FLASH_Unlock` 相关 `FLASH_FLAG_*` | 宏 | 擦之前清错误标志 |
+| `MX_USART1_UART_Init` / `MX_GPIO_Init` / `MX_TIM6_Init` / `MX_TIM3_Init` / `SystemClock_Config` / `Error_Handler` | 函数 | CubeMX 生成的初始化入口（示例只调用，不定义） |
+
+> 说明：`MX_TIM6_Init` 只有在你启用 TIM6 时基时才需要；默认走 SysTick 的版本不需要它。
+
+### 7.3 三族差异（示例里的分支就是按这张表选的）
+
+| 项目 | F1 / F0 / L0 | F4 / F3 | H7 |
+| --- | --- | --- | --- |
+| 编程单位宏 | `FLASH_TYPEPROGRAM_HALFWORD` | `FLASH_TYPEPROGRAM_WORD` | `FLASH_TYPEPROGRAM_FLASHWORD` |
+| 擦除方式 | `FLASH_TYPEERASE_PAGES`（页） | `FLASH_TYPEERASE_SECTORS`（扇区）+ `FLASH_VOLTAGE_RANGE_3` | `FLASH_TYPEERASE_SECTORS` + `Banks` |
+| 写保护错误标志 | `FLASH_FLAG_WRPERR`（寄存器位叫 `SR_WRPRTERR`，HAL 宏不叫 `WRPRTERR`） | `FLASH_FLAG_WRPERR` | `FLASH_FLAG_ALL_ERRORS` |
+| 示例默认存放区 | `0x0801FC00`（末页 1KB） | `0x080E0000`（Sector 11） | `0x081E0000`（Sector 7 Bank2） |
+| 1ms 硬件定时器 | F103C8 只有 TIM1~TIM4，**没有 TIM6** | TIM6 可用 | TIM6 可用 |
+
+分支判据按"擦除单位"选族（`FLASH_TYPEERASE_PAGES` → F1；`FLASH_TYPEERASE_SECTORS` +
+`FLASH_TYPEPROGRAM_WORD` → F4；`FLASH_TYPEPROGRAM_FLASHWORD` → H7）。**不要**用
+`FLASH_TYPEPROGRAM_HALFWORD` 当判据：F4 也定义了这个宏，会把 F4 误判成 F1，编不过。
+
+### 7.4 验证矩阵（本轮实测，脚本共 15 项）
+
+| 构建项 | 编译器参数 | 结果 |
+| --- | --- | --- |
+| 核心三模块 `pid_comm` / `pid_calc` / `pid_app` | `cortex-m4 -mthumb -O2 -Wall -Wextra` | 通过，零告警 |
+| `main_example.c` × 桩 F1/F4/H7 | `cortex-m3/m4/m7 -O2 -Wall -Wextra` | 通过，零告警 |
+| `pid_nvm_stm32_example.c` × 桩 F1/F4/H7 | 同上 | 通过，零告警 |
+| `main_example.c`（`PID_EXAMPLE_USE_TIM6=1` 分支） | `cortex-m3` 桩 | 通过，零告警 |
+| `main_example.c` / `pid_nvm_stm32_example.c` | **真实 F1 HAL**（STM32Cube_FW_F1_V1.8.7，`STM32F103xB`） | 通过，零告警 |
+| `main_example.c` / `pid_nvm_stm32_example.c` | **真实 F4 HAL**（STM32Cube_FW_F4_V1.28.3，`STM32F407xx`） | 通过，零告警 |
+| `main_example.c`（`PID_EXAMPLE_USE_TIM6=1` 分支） | 真实 F4 HAL | 通过，零告警 |
+| 真实 H7 HAL | 本机无 STM32Cube_FW_H7 包 | **未验证**：只有桩级别的语法/类型检查 |
+| 上板实跑（擦写 Flash、UART 中断、PWM） | — | **未验证**：无实物板，属硬件待验项 |
+
+**诚实边界**：桩验证能拦住语法、类型、宏改名、函数签名漂移；拦不住"型号相关的运行时行为"——
+Flash 扇区大小、电压范围、时序、中断优先级这些仍要上板确认。H7 分支的 API 用法按公开头文件写，
+但本机没有 H7 的 Cube 包，没有做过真实 HAL 对照，属于"桩验证、未上板、未对真实头文件"的三重空白。
+
+### 7.5 这一轮编译验证抓出来的问题（已修）
+
+| 问题 | 后果 | 修法 |
+| --- | --- | --- |
+| F4 也定义 `FLASH_TYPEPROGRAM_HALFWORD`，示例按该宏选分支 | **F4 走到 F1 分支**，`FLASH_FLAG_PGERR` / `FLASH_TYPEERASE_PAGES` 在 F4 未定义 → 真实 F4 HAL 下编不过 | 分支判据改为按擦除单位（见 7.3） |
+| 示例写死 TIM6 做毫秒时基 | **F103C8（示例点名的芯片）没有 TIM6** → 目标芯片上编不过 | 默认改用 SysTick（`HAL_GetTick`），TIM6 变成可选开关 |
+| F1 侧写了 `FLASH_FLAG_WRPRTERR` | 真实 F1 HAL 的宏叫 `FLASH_FLAG_WRPERR` → 编不过 | 统一改成 `FLASH_FLAG_WRPERR` |
+
+### 7.6 怎么跑
+
+```powershell
+# 仓库根目录；需要 Arm GNU Toolchain（arm-none-eabi-gcc）在 PATH 里
+pwsh scripts/verify_mcu_build.ps1
+
+# 机器上没有 STM32Cube 包时（只用桩，仍然严格执行零告警）
+pwsh scripts/verify_mcu_build.ps1 -SkipRealHal
+```
+
+脚本会：编译核心三模块 → 两份示例 × 三族（桩）→ TIM6 可选分支 → 找到 Cube 包再对真实 HAL 编一遍；
+任何一项非零退出或**本仓源码**出现告警即返回 1（vendor 头文件自身的告警不记账）。
+

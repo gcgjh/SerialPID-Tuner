@@ -4,7 +4,7 @@
   1. 数据管道在长时间高频下不退化（队列跑满后内存与重画耗时平稳）；
   2. 断线重连可无限循环（100 次 open/close，线程与句柄不累积）；
   3. 日志与聚合状态不随时间膨胀（坏帧 + 未知帧混合灌两万条后行数有界）；
-  4. 时间戳回绕不让横轴错乱（构造跨 2^32 毫秒的三个连续样本）。
+  4. 时间轴回绕 / 复位不让横轴错乱（card11 补齐：回绕、会话内复位、重连三条路径）。
 
 运行：
     python -m pytest tests/test_long_run.py --long-run -v
@@ -145,6 +145,17 @@ def test_pipeline_stable_after_queue_full(qapp):
         assert win._plot.point_count == QUEUE_CAP, "队列未封顶"
         assert len(win._buffer) == QUEUE_CAP, "模型缓冲未封顶"
 
+        # 时间轴无累积漂移（card11）：14.4 万帧后横轴仍是精确的毫秒累计，
+        # 首尾相差一个整数毫秒数，浮点累加式实现会在这里露出偏差。
+        xs = win._plot._extract(0)[:, 0]
+        assert xs[0] == pytest.approx((total - QUEUE_CAP) * 0.05, abs=1e-9), (
+            f"回绕式时间轴首点漂移：{xs[0]}"
+        )
+        assert xs[-1] == pytest.approx((total - 1) * 0.05, abs=1e-9), (
+            f"回绕式时间轴末点漂移：{xs[-1]}"
+        )
+        assert bool((np.diff(xs) >= 0).all()), "时间轴非单调"
+
         growth = end_rss - rss_at_full
         assert growth < 20.0, f"队列跑满后内存仍增长 {growth:.1f}MB（基线 {base_rss:.1f}MB）"
 
@@ -271,11 +282,11 @@ def test_log_bounded_under_mixed_frames(qapp):
         qapp.processEvents()
 
 
-# ---------------------------------------------------------------- 假设四
+# ---------------------------------------------------------------- 假设四（card11）
 
 
 def test_timestamp_wraparound_axis_sane(qapp):
-    """32 位毫秒回绕：横轴不出现负跨度、不把曲线挤出视口。"""
+    """32 位毫秒回绕：横轴接着走、数据不清空、跨度为真实跨度。"""
     from serialpid.gui.plot_panel import PlotPanel
     from serialpid.model import TelemetrySample
 
@@ -289,18 +300,88 @@ def test_timestamp_wraparound_axis_sane(qapp):
         panel.render_now()
 
         x = panel._extract(0)[:, 0]
-        monotonic = bool((x[1:] - x[:-1] >= 0).all())
+        assert len(x) == len(stamps), f"回绕不该清数据，实际只剩 {len(x)} 点"
+        assert bool((np.diff(x) >= 0).all()), f"横轴非单调：{x}"
+        assert x[0] == pytest.approx(0.0), f"首点应为 0，实际 {x[0]}"
+        assert x[-1] == pytest.approx(0.6, abs=1e-9), f"回绕后末点应 0.6s，实际 {x[-1]}"
+        assert panel.timeline_restarts == 0, "回绕被误判成复位（不该重启时间轴）"
+
         rendered_x, _ = panel._pv_curve.getData()
-        rendered = 0 if rendered_x is None else len(rendered_x)
+        assert rendered_x is not None and len(rendered_x) > 0, "回绕后曲线为空"
         span = panel._pv_plot.getViewBox().viewRange()[0]
         width = span[1] - span[0]
-
-        if not monotonic or rendered == 0 or width <= 0 or width > 30.0:
-            pytest.xfail(
-                f"已知缺陷（见 docs/PRESSURE_TEST.md · P-01）：回绕后 x 内部值 "
-                f"{x[0]:.1f}..{x[-1]:.1f}s，单调={monotonic}，"
-                f"视口跨度 {width:.1f}s（7 帧仅覆盖约 0.6s）"
-            )
+        assert 0.0 < width <= 1.0, f"视口跨度 {width:.1f}s，7 帧只覆盖 0.6s"
     finally:
         panel.close()
+        qapp.processEvents()
+
+
+def test_timestamp_reset_axis_sane(qapp):
+    """会话中途时间戳复位（MCU 软复位 / 重新上电）：按新会话重开，十秒窗仍有效。"""
+    from serialpid.gui.plot_panel import PlotPanel
+    from serialpid.model import TelemetrySample
+
+    panel = PlotPanel(window_seconds=10.0)
+    try:
+        # 先灌 30 秒正常数据（20Hz）
+        for i in range(600):
+            panel.append(TelemetrySample(i * 50, 25.0, 24.0, 30.0, 1.0))
+        panel.render_now()
+        assert panel._extract(0)[-1, 0] == pytest.approx(29.95, abs=1e-9)
+
+        # 固件复位：时间戳从 0 重新计数，再来 10 秒
+        for i in range(200):
+            panel.append(TelemetrySample(i * 50, 25.0, 24.5, 30.0, 1.0))
+        panel.render_now()
+
+        x = panel._extract(0)[:, 0]
+        assert bool((np.diff(x) >= 0).all()), f"复位后横轴非单调：{x[0]}..{x[-1]}"
+        assert x[0] == pytest.approx(0.0, abs=1e-9), f"复位后起点应归零，实际 {x[0]}"
+        assert panel.point_count == 200, (
+            f"旧会话数据仍留在新时间轴上（{panel.point_count} 点），"
+            "两段会话被拼成一条轴会让调节时间读数失真"
+        )
+        assert panel.timeline_restarts == 1, "复位未被识别为新会话"
+
+        vr = panel._pv_plot.getViewBox().viewRange()[0]
+        width = vr[1] - vr[0]
+        assert vr[0] >= 0.0, f"视口起点为负：{vr[0]:.2f}s"
+        assert 9.0 <= width <= 11.5, f"十秒窗失效，视口跨度 {width:.1f}s"
+
+        rendered_x, _ = panel._pv_curve.getData()
+        assert rendered_x is not None and len(rendered_x) >= 190, (
+            f"可见点数 {0 if rendered_x is None else len(rendered_x)} 与窗口不匹配"
+        )
+    finally:
+        panel.close()
+        qapp.processEvents()
+
+
+def test_reconnect_resets_timeline_via_main_window(qapp):
+    """配套重连路径：连接建立即走"时间轴重启"入口（卡11 第四条）。"""
+    from serialpid.protocol import PacketType, pack_telemetry
+
+    win = _new_window(qapp)
+    try:
+        for i in range(600):
+            win._on_frame(PacketType.TELEMETRY, pack_telemetry(i * 50, 25.0, 24.0, 30.0, 1.0))
+        win._plot.render_now()
+        assert win._plot.point_count == 600
+
+        # 断线重连：连接成功事件必须把时间基准归零
+        win._on_connection(True, "tcp://127.0.0.1:9000")
+        assert win._plot.point_count == 0, "重连后仍保留上一会话数据"
+        assert win._plot.timeline_restarts == 1, "重连未触发时间轴重启"
+
+        for i in range(200):
+            win._on_frame(PacketType.TELEMETRY, pack_telemetry(i * 50, 25.0, 24.5, 30.0, 1.0))
+        win._plot.render_now()
+
+        x = win._plot._extract(0)[:, 0]
+        assert x[0] == pytest.approx(0.0, abs=1e-9), f"重连后起点应归零，实际 {x[0]}"
+        assert bool((np.diff(x) >= 0).all()), "重连后横轴非单调"
+        vr = win._plot._pv_plot.getViewBox().viewRange()[0]
+        assert vr[0] >= 0.0, f"重连后视口起点为负：{vr[0]:.2f}s"
+    finally:
+        win.close()
         qapp.processEvents()

@@ -1,8 +1,13 @@
-"""事件日志与 CSV 导出面板。"""
+"""事件日志与 CSV 导出面板。
+
+导出只做两件事：从遥测缓冲取样本、弹保存对话框；格式（列序、六位小数、
+UTF-8 带 BOM、CRLF、原子写）全部由 ``serialpid.csv_export.export_telemetry``
+一处实现 —— 不要在按钮回调里自己 ``csv.writer`` 拼字符串（card12：
+同一能力只允许一个实现，否则"测试测的"和"用户拿到的"会分叉）。
+"""
 
 from __future__ import annotations
 
-import csv
 import time
 from pathlib import Path
 
@@ -16,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..csv_export import CsvExportError, export_telemetry
 from ..model import TelemetryBuffer
 
 
@@ -45,7 +51,7 @@ class LogPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.addWidget(box)
 
-        self._export.clicked.connect(self._export_csv)
+        self._export.clicked.connect(self._on_export_clicked)
         self._clear_log.clicked.connect(self._view.clear)
 
     def log(self, message: str) -> None:
@@ -60,19 +66,31 @@ class LogPanel(QWidget):
         """由主窗口连接：清空日志文字（聚合状态由主窗口一并重置）。"""
         return self._clear_log
 
-    def _export_csv(self) -> None:
-        samples = self._buffer.samples()
-        if not samples:
+    # ------------------------------------------------------------------ 导出
+
+    def _on_export_clicked(self) -> None:
+        if not self._buffer.samples():
             self.log("缓冲为空，无数据可导出")
             return
         default = f"pid_log_{time.strftime('%Y%m%d_%H%M%S')}.csv"
         path, _ = QFileDialog.getSaveFileName(self, "导出 CSV", default, "CSV (*.csv)")
         if not path:
             return
-        # UTF-8 BOM，Excel 直开不乱码
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f)
-            writer.writerow(["t_ms", "SP", "PV", "OUT", "err"])
-            for s in samples:
-                writer.writerow([s.t_ms, f"{s.sp:.4f}", f"{s.pv:.4f}", f"{s.out:.4f}", f"{s.err:.4f}"])
-        self.log(f"已导出 {len(samples)} 条记录 -> {Path(path).name}")
+        self.export_to(path)
+
+    def export_to(self, path: str) -> int:
+        """把缓冲内全部样本写到 ``path``，返回写入行数（失败返回 0 并记日志）。
+
+        这是界面侧的导出入口；不弹对话框，便于自动化测试与交叉验证。
+        """
+        samples = self._buffer.samples()
+        if not samples:
+            self.log("缓冲为空，无数据可导出")
+            return 0
+        try:
+            rows = export_telemetry(samples, path)
+        except (CsvExportError, OSError) as exc:
+            self.log(f"导出失败：{exc}")
+            return 0
+        self.log(f"已导出 {rows} 条记录（六位小数）-> {Path(path).name}")
+        return rows

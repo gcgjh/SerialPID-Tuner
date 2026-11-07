@@ -8,7 +8,9 @@
  *
  * 使用前提（CubeMX 已生成）：
  *   - USART1：115200 8N1，开启 NVIC 中断（优先级建议 3，低于控制/编码器中断）
- *   - TIM6 ：1kHz 更新中断，仅用于毫秒时基（若 SysTick 未被 RTOS 占用可省）
+ *   - 毫秒时基：默认用 SysTick（HAL_GetTick），CubeMX 默认就开着，不需要额外配；
+ *     要用独立 TIM6 时定义 PID_EXAMPLE_USE_TIM6=1 并配好 1kHz 更新中断
+ *     （注意 F103C8 等 F1 中容量型号没有 TIM6，此时只能用 SysTick 或 TIM4）
  *   - TIM3 ：PWM 输出（示例留了 TODO，按实际通道改）
  *   - ADC ：采样被控量（示例默认用一阶仿真对象，便于无硬件联调）
  *
@@ -16,7 +18,30 @@
  *           解析、控制、组帧、发送全部在主循环，中断里绝不阻塞。
  */
 
-#include "main.h"
+/* ---- HAL 头文件：真实工程用 CubeMX 的 main.h，仓库回归用 mcu/stubs 下的桩 ----
+ *
+ * 正常使用（粘进自己的 CubeMX 工程）什么都不用定义：工程里一定有 main.h。
+ * 仓库内编译验证时没有 CubeMX 工程，验证脚本会传 -DPID_HAL_STUB=1 并加上
+ * mcu/stubs 到 include 路径，此时走桩头文件。
+ *
+ * PID_HAL_STUB 有意做成"三态"：不定义=自动探测，1=强制桩，0=强制真实 HAL。
+ * 强制项存在的意义：桩与真实 HAL 必须能分别验证，否则签名漂移测不出来。
+ */
+#if !defined(PID_HAL_STUB)
+#  if defined(__has_include)
+#    if __has_include("main.h")
+#      include "main.h"
+#    else
+#      include "stm32_hal_stub.h"
+#    endif
+#  else
+#    include "main.h"          /* 老编译器没有 __has_include，按真实工程处理 */
+#  endif
+#elif PID_HAL_STUB
+#  include "stm32_hal_stub.h"
+#else
+#  include "main.h"
+#endif
 
 #include "pid_app.h"
 #include "pid_calc.h"
@@ -31,18 +56,38 @@
 #define PID_DEMO_SIMULATED_PLANT 1
 #endif
 
+/**
+ * 毫秒时基来源：
+ *   0（默认）= SysTick（HAL_GetTick），全系 F1/F4/H7 都有；
+ *   1        = TIM6 更新中断，需要 CubeMX 里配上 TIM6 并声明 htim6。
+ *
+ * 为什么默认改成 SysTick：本示例文档里点名的 F103C8 属于 F1 中容量，
+ * 只有 TIM1~TIM4，**没有 TIM6**——原来写死 TIM6 的版本在目标芯片上编不过。
+ * 需要独立 1ms 中断（比如 SysTick 被 RTOS 占了）时再打开这个开关。
+ */
+#ifndef PID_EXAMPLE_USE_TIM6
+#define PID_EXAMPLE_USE_TIM6 0
+#endif
+
 #define EXAMPLE_BAUD_RATE 115200u
 
 extern UART_HandleTypeDef huart1;
-extern TIM_HandleTypeDef  htim6;
 extern TIM_HandleTypeDef  htim3;
+#if PID_EXAMPLE_USE_TIM6
+extern TIM_HandleTypeDef  htim6;
+#endif
 
 /* ============================ 全局状态 ============================ */
 
 static pid_app_t g_app;
 static uint8_t   g_rx_byte;
 
-volatile uint32_t g_ms_ticks = 0u;   /**< TIM6 1ms 计数，作为应用时基 */
+#if PID_EXAMPLE_USE_TIM6
+static volatile uint32_t g_ms_ticks = 0u;   /**< TIM6 1ms 计数，作为应用时基 */
+#define PID_EXAMPLE_NOW_MS() (g_ms_ticks)
+#else
+#define PID_EXAMPLE_NOW_MS() (HAL_GetTick())   /**< SysTick 毫秒计数 */
+#endif
 
 #if PID_DEMO_SIMULATED_PLANT
 /* 一阶惯性对象：K=0.45，T=8s，pv 稳态 = 0.45*out。仅用于台架自测。 */
@@ -139,12 +184,16 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
 }
 
-/** 1ms 定时器：只累加时基，不做业务 */
+/** 1ms 时基：默认走 SysTick，只有显式启用 TIM6 时才在这里累加 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
+#if PID_EXAMPLE_USE_TIM6
     if (htim->Instance == TIM6) {
         g_ms_ticks++;
     }
+#else
+    (void)htim;    /* 默认时基在 SysTick，本回调不被调用 */
+#endif
 }
 
 /* ============================ 备选：DMA + IDLE 接收 ============================ */
@@ -207,9 +256,11 @@ void PID_Example_Init(void)
 
     pid_app_init(&g_app, &io, &cfg);
 
-    /* --- 启动接收：先挂中断，再开 TIM --- */
+    /* --- 启动接收：先挂中断，再开时基 --- */
     (void)HAL_UART_Receive_IT(&huart1, &g_rx_byte, 1u);
+#if PID_EXAMPLE_USE_TIM6
     HAL_TIM_Base_Start_IT(&htim6);
+#endif
 
     /* 若用 PWM：HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); */
 }
@@ -230,7 +281,7 @@ int main(void)
         pid_app_poll(&g_app);
 
         /* 2) 控制节拍 + 遥测 + 延迟落 Flash */
-        pid_app_tick(&g_app, g_ms_ticks);
+        pid_app_tick(&g_app, PID_EXAMPLE_NOW_MS());
 
         /* 3) 你自己的其他后台任务放这里，注意单次不要超过 ~5ms，
          *    否则 UART 1 字节中断可能 ORE 溢出 */

@@ -166,6 +166,12 @@ class MainWindow(QMainWindow):
 
     def _on_connection(self, connected: bool, detail: str) -> None:
         if connected:
+            # 新会话：绘图时间基准从 0 重新起算（card11）。
+            # 板子复位 / 重新上电后时间戳从 0 重新计数，若沿用上一场的零点，
+            # 横轴会立刻跳到负数区间，时间窗名存实亡。
+            # 边界：这里只重置绘图时间轴；主窗口遥测缓冲与阶跃分析仍保留上一会话
+            # 样本（导出 / 统计会看到两段 t_ms），需要一并清零时走 _clear_records。
+            self._plot.restart_timeline("连接建立，时间轴从 0 起算")
             self._connect_btn.setText("断开")
             self._state_label.setText("已连接")
             self._state_label.setStyleSheet("color: #2ecc71;")

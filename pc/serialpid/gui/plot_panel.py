@@ -1,5 +1,16 @@
 """实时曲线面板：上半 SP/PV，下半 OUT。
 
+v4（card11 修复 · 时间轴回绕 / 复位）：
+  内部横轴不再是"当前样本原始毫秒 - 首个样本毫秒"（那个式子隐含"时间戳永不
+  回退、永不过 32 位边界、基准永远有效"三个前提，真实硬件三样都不成立）。
+  现在用"原始 u32 毫秒 + 回绕补偿 - 会话零点"，并且区分两种负跳变：
+    * 回绕（差值约 -2^32，跑满 49.7 天一次）：补偿一个周期，数据接着画；
+    * 复位（差值是小幅负数：MCU 重新上电 / 软复位 / 换板子）：判为新会话，
+      清空已画数据、零点重置到当前帧，横轴从 0 重新计时，绝不把两段会话
+      拼到同一条时间轴（那会让调节时间读数失真）。
+  时间轴重启只有一个入口 ``restart_timeline``：连接建立、检测到复位、
+  手动清空三条路径都走它，避免只修好其中一条。
+
 v3（card7 修复 · 横轴缩放救回）：
   横轴有"跟随 / 自由"两种模式，与纵轴自动/手动、暂停互不相干：
     * 跟随：每帧按时间窗滚动横轴（旧行为），适合实时盯盘；
@@ -51,6 +62,15 @@ from ..model import TelemetryBuffer, TelemetrySample
 
 _UNSET = object()  # 区分"未传参"与"显式传 None(=全部窗口)"
 
+# 时间轴常量（card11）：
+# 协议时间戳是 32 位无符号毫秒，一个完整周期约 49.7 天。
+_U32_SPAN = 1 << 32
+_U32_MASK = _U32_SPAN - 1
+# 负跳变的判据门槛：幅度达到半个周期才算"回绕"，否则一律按"复位"处理。
+# 回绕的真实差值接近 -2^32；复位的差值只是"从当前进度跳回 0"的小幅负数。
+# 这个门槛把两者分开——千万不要改成"取模"：复位时取模会得到一个巨大的正数。
+_WRAP_GUARD = 1 << 31
+
 _FOLLOW_COLOR = "#888888"
 _FREE_COLOR = "#e6a23c"
 
@@ -97,7 +117,14 @@ class PlotPanel(QWidget):
         self._ring: np.ndarray = np.empty((self._cap, 4), dtype=np.float64)
         self._count = 0
         self._head = 0
-        self._t0: Optional[int] = None
+
+        # 时间轴状态（card11）：内部 x = (原始 u32 毫秒 + 回绕补偿 - 会话零点) / 1000。
+        # 三件事分开存，改之前先读 _advance_timeline 的注释：
+        self._t_last_raw: Optional[int] = None   # 上一帧原始时间戳（已按 u32 取模）
+        self._t_wrap_offset: int = 0             # 回绕累计补偿，每回绕一次 +2^32
+        self._t_base: Optional[int] = None       # 会话零点（原始 + 补偿），换会话即更新
+        self._timeline_restarts: int = 0         # 时间轴重启次数（诊断 / 测试用）
+        self._timeline_note: str = ""            # 最近一次重启原因，工具条短暂显示
 
         self._dirty = False
         self._paused = False
@@ -222,9 +249,8 @@ class PlotPanel(QWidget):
         self._dirty = True
 
     def append(self, sample: TelemetrySample) -> None:
-        if self._t0 is None:
-            self._t0 = sample.t_ms
-        row = ((sample.t_ms - self._t0) / 1000.0, sample.sp, sample.pv, sample.out)
+        x_sec = self._advance_timeline(int(sample.t_ms))
+        row = (x_sec, sample.sp, sample.pv, sample.out)
         if self._count < self._cap:
             self._ring[(self._head + self._count) % self._cap] = row
             self._count += 1
@@ -236,16 +262,83 @@ class PlotPanel(QWidget):
             self._buf.append(sample)
         self._dirty = True   # 只置标记，重画交给定时器
 
-    def clear(self) -> None:
-        self._count = 0
-        self._head = 0
-        self._t0 = None      # 重置时间基准，下次 append 从 0 起，横轴不跳变
-        # 时间基准重置后，自由模式的旧视口已无意义，回到跟随避免空白
-        self._follow = True
-        self._update_mode_label()
+    def restart_timeline(self, note: str = "时间轴已重启") -> None:
+        """时间轴重启的唯一对外入口（card11）。
+
+        三条路径都走这里，不要各写各的临时处理：
+          * 连接建立（``MainWindow`` 收到连接成功）——重连即新会话；
+          * 收到复位后的第一帧（``_advance_timeline`` 内部判定）；
+          * 用户点"清空"（``clear`` 委托到这里）。
+        语义：丢弃已画数据、零点归零、回到跟随模式。若不丢弃旧数据，新会话
+        的点会落在旧的 x 轴上，横轴非单调，二分切片与抽稀分桶同时失效。
+        """
         if self._buf is not None:
             self._buf.clear()
+        self._restart_timeline(note)
+
+    def clear(self) -> None:
+        """手动清空：与重连 / 复位共用同一入口，避免只修好其中一条路径。"""
+        self.restart_timeline("手动清空，时间轴从 0 重新计时")
+
+    def _restart_timeline(self, note: str) -> None:
+        """重置时间轴状态（不照顾外部缓冲，由 restart_timeline 统一负责）。"""
+        self._count = 0
+        self._head = 0
+        self._t_base = None
+        self._t_last_raw = None
+        self._t_wrap_offset = 0
+        # 时间基准重置后，自由模式的旧视口已无意义，回到跟随避免空白
+        self._follow = True
+        self._timeline_restarts += 1
+        self._timeline_note = note
+        self._update_mode_label()
         self._dirty = True
+
+    def _advance_timeline(self, t_ms: int) -> float:
+        """把原始 u32 毫秒推进成单调递增的内部横轴（秒）。
+
+        判据全部写在这里，改错之前请先读完：
+
+        * **回绕**：时间戳从 0xFFFFFFFF 附近滚到 0，差值约等于 -2^32
+          （-42.9 亿毫秒），判据 ``差值 <= -2^31``（幅度达到半个周期）。
+          处理是给补偿加一个完整周期，时间轴接着走、数据不清——这是同一场
+          会话里的正常现象，约 49.7 天出现一次。
+        * **复位**：MCU 重新上电 / 软复位 / 换板子后时间戳从 0 重新计数，
+          差值是一个幅度远小于半个周期的负数（判据与回绕互补）。处理是按
+          新会话重开时间轴：清掉旧数据、零点挪到当前帧、横轴从 0 起算。
+          之所以不"补偿后接着走"，是因为两段数据分属不同会话，拼在同一条
+          轴上会让调节时间、峰值时间这些读数失真。
+
+        绝不能改成"当前减首个再取模"：回绕时对，复位时会把负差值映射成
+        一个巨大的正数，曲线直接飞出屏幕（比当前缺陷更糟）。
+        """
+        raw = t_ms & _U32_MASK
+        if self._t_base is None:
+            # 首帧 / 刚重启：本帧即零点
+            self._t_base = raw
+            self._t_wrap_offset = 0
+            self._t_last_raw = raw
+            return 0.0
+
+        delta = raw - self._t_last_raw  # 可负，两个 u32 相减在 Python 里不溢出
+        if delta < 0:
+            if delta >= -_WRAP_GUARD:
+                # 复位：新会话。清数据后本帧作为新零点。
+                self.restart_timeline("检测到时间戳复位，横轴已从 0 重新计时")
+                self._t_base = raw
+                self._t_last_raw = raw
+                return 0.0
+            # 回绕：同一会话，补偿一个完整周期后继续
+            self._t_wrap_offset += _U32_SPAN
+
+        self._t_last_raw = raw
+        # 整数做加减，结果精确；毫秒转秒只在最后做一次，长跑无累积漂移
+        return (raw + self._t_wrap_offset - self._t_base) / 1000.0
+
+    @property
+    def timeline_restarts(self) -> int:
+        """时间轴重启次数（连接建立 / 检测到复位 / 手动清空各计一次）。"""
+        return self._timeline_restarts
 
     def render_now(self) -> None:
         """同步重画一帧（测试 / 手动刷新用）。"""
@@ -451,7 +544,11 @@ class PlotPanel(QWidget):
             plot.getViewBox().enableAutoRange(x=False, y=self._y_auto)
         if self._follow:
             pad = span * 0.02 if span > 0 else 1.0
-            self._set_shared_x_range(x0 - pad, x_end + pad)
+            left = x0 - pad
+            if x0 >= 0.0:
+                # 会话从 0 起算时，2% padding 不许把横轴推成负区间（card11 验收）
+                left = max(0.0, left)
+            self._set_shared_x_range(left, x_end + pad)
         else:
             # 自由模式：不碰横轴，但两张图必须同段（防止一处缩放另一处不同步）
             vr = self._pv_plot.getViewBox().viewRange()[0]
@@ -460,9 +557,13 @@ class PlotPanel(QWidget):
             if abs(float(ovr[0]) - xl) > 1e-9 or abs(float(ovr[1]) - xr) > 1e-9:
                 self._out_plot.getViewBox().setXRange(xl, xr, padding=0)
 
-        # ---- 提示：淘汰优先，其次上限提示 ----
+        # ---- 提示：时间轴重启 > 淘汰 > 上限 ----
+        if self._timeline_note and x_end >= 3.0:
+            self._timeline_note = ""   # 新会话已跑满 3 秒，重启提示让位给常规提示
         at_cap = self._count >= self._cap or (self._buf is not None and len(self._buf) >= self._cap)
-        if hint:
+        if self._timeline_note:
+            self._cap_hint.setText(self._timeline_note)
+        elif hint:
             self._cap_hint.setText(hint)
         elif at_cap and self._follow:
             self._cap_hint.setText("已达数据上限，时间窗按上限截断")

@@ -9,13 +9,34 @@
  *   F103C8 (64KB)  : 0x0801FC00，页大小 1KB
  *   F407VG (1MB)   : 0x080E0000，Sector 11（128KB）
  *   H743   (2MB)   : 0x081E0000，Sector 7 Bank2（按你的链接脚本确认）
- * 改芯片时只需改下面两个宏，并在链接脚本里把该区域排除。
+ *
+ * 下面的默认值按"擦除单位"自动选族，换芯片多数情况不用动；
+ * 需要写别的位置时用 -D 覆盖这三个宏，并在链接脚本里把该区域排除：
+ *   PID_NVM_ADDR / PID_NVM_SECTOR / PID_NVM_BANK
+ * 注意判族用擦除宏（FLASH_TYPEERASE_PAGES/SECTORS），不能用编程单位宏——
+ * F4 也定义了 FLASH_TYPEPROGRAM_HALFWORD，用它判族会把 F4 误判成 F1。
  *
  * 写入策略：应用层已做 5s 静默防抖（PID_NVM_SAVE_DELAY_MS），
  * 这里只管一次擦写，不做重试——失败会上报 ERROR(0x04)。
  */
 
-#include "main.h"
+/* ---- HAL 头文件：真实工程用 CubeMX 的 main.h，仓库回归用 mcu/stubs 下的桩 ----
+ * 三态宏的约定与 main_example.c 完全一致，两个示例必须同进同退。 */
+#if !defined(PID_HAL_STUB)
+#  if defined(__has_include)
+#    if __has_include("main.h")
+#      include "main.h"
+#    else
+#      include "stm32_hal_stub.h"
+#    endif
+#  else
+#    include "main.h"
+#  endif
+#elif PID_HAL_STUB
+#  include "stm32_hal_stub.h"
+#else
+#  include "main.h"
+#endif
 
 #include "pid_app.h"
 #include "pid_comm.h"
@@ -24,17 +45,38 @@
 #include <string.h>
 
 /* ============================ 芯片相关宏 ============================ */
+/*
+ * 默认值按"Flash 擦除/编程单位"自动选族，和下面的分支判断用同一组判据：
+ *   看到 FLASH_TYPEPROGRAM_FLASHWORD  -> H7      （0x081E0000，Sector 7 Bank2）
+ *   看到 FLASH_TYPEERASE_PAGES        -> F1/F0/L0（0x0801FC00，页 1KB）
+ *   看到 FLASH_TYPEERASE_SECTORS      -> F4/F3   （0x080E0000，Sector 11 128KB）
+ * 三个地址都落在"最后一页/扇区"，改芯片时用 -D 覆盖下面三个宏即可。
+ */
+
+#if defined(FLASH_TYPEPROGRAM_FLASHWORD)
+#define PID_NVM_DEFAULT_ADDR   0x081E0000u
+#define PID_NVM_DEFAULT_SECTOR FLASH_SECTOR_7
+#define PID_NVM_DEFAULT_BANK   FLASH_BANK_2
+#elif defined(FLASH_TYPEERASE_PAGES)
+#define PID_NVM_DEFAULT_ADDR   0x0801FC00u
+#define PID_NVM_DEFAULT_SECTOR 0u        /* F1 按页擦除，不用扇区号 */
+#define PID_NVM_DEFAULT_BANK   0u
+#else
+#define PID_NVM_DEFAULT_ADDR   0x080E0000u
+#define PID_NVM_DEFAULT_SECTOR FLASH_SECTOR_11
+#define PID_NVM_DEFAULT_BANK   FLASH_BANK_1
+#endif
 
 #ifndef PID_NVM_ADDR
-#define PID_NVM_ADDR 0x0801FC00u
+#define PID_NVM_ADDR PID_NVM_DEFAULT_ADDR
 #endif
 
 #ifndef PID_NVM_SECTOR
-#define PID_NVM_SECTOR FLASH_SECTOR_11
+#define PID_NVM_SECTOR PID_NVM_DEFAULT_SECTOR
 #endif
 
 #ifndef PID_NVM_BANK
-#define PID_NVM_BANK FLASH_BANK_1
+#define PID_NVM_BANK PID_NVM_DEFAULT_BANK
 #endif
 
 #if defined(__GNUC__)
@@ -82,7 +124,7 @@ bool pid_nvm_load_impl(void *ctx, pid_nvm_t *out)
 
 /* ============================ F1/F0/L0：页擦除 + 半字编程 ============================ */
 
-#if defined(FLASH_TYPEPROGRAM_HALFWORD)
+#if defined(FLASH_TYPEERASE_PAGES)
 
 bool pid_nvm_save_impl(void *ctx, const pid_nvm_t *in)
 {
@@ -103,7 +145,7 @@ bool pid_nvm_save_impl(void *ctx, const pid_nvm_t *in)
 
     HAL_FLASH_Unlock();
     __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_PGERR |
-                           FLASH_FLAG_WRPRTERR);
+                           FLASH_FLAG_WRPERR);
 
     memset(&erase, 0, sizeof(erase));
     erase.TypeErase   = FLASH_TYPEERASE_PAGES;
@@ -141,7 +183,7 @@ bool pid_nvm_save_impl(void *ctx, const pid_nvm_t *in)
 
 /* ============================ F4/F3：扇区擦除 + 字编程 ============================ */
 
-#elif defined(FLASH_TYPEPROGRAM_WORD)
+#elif defined(FLASH_TYPEERASE_SECTORS) && defined(FLASH_TYPEPROGRAM_WORD)
 
 bool pid_nvm_save_impl(void *ctx, const pid_nvm_t *in)
 {

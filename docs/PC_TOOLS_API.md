@@ -124,9 +124,12 @@ mgr.restore_defaults(clear=False)     # 不覆盖同名用户预设，默认项�
 
 ## 4. 接线注意
 
-- GUI 导出功能请直接调用 `csv_export.export_csv` / `CsvWriter`。
-  目前 `gui/log_panel.py::_export_csv` 与 `step_test.py::export_csv` 各自手写了 CSV，
-  表头大小写、`t_ms` 格式、小数位互不一致，建议统一替换，避免同一份数据三种格式。
+- GUI 导出功能请直接调用 `csv_export.export_telemetry`（内部就是 `export_csv`）。
+  `gui/log_panel.py` 已改为只负责"取样本 + 弹保存框"，列序 / 六位小数 /
+  UTF-8 带 BOM 全部由本模块决定，界面不再自拼字符串（card12）。
+- 遗留：`step_test.py::StepTester.export_csv` 仍是独立实现（小写表头、
+  `t_ms` 写成三位小数），与上表格式不一致；它目前只被测试调用、尚未接入界面。
+  后续统一时改调 `export_telemetry` 即可 —— 这是已登记的空白，不是隐藏缺陷。
 - 预设 UI（v0.2）直接使用 `PresetManager`；当前 GUI 尚未接线。
 
 ## 5. 载荷长度预检（card3 缺陷一，`protocol.py`）
