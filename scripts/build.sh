@@ -134,21 +134,25 @@ WORK="${TMPDIR:-/tmp}/SerialPID-Tuner-build/work"
 PYDIST="${TMPDIR:-/tmp}/SerialPID-Tuner-build/dist"
 mkdir -p dist
 
+BUNDLE_EXTRA=()
 if [ "$PLATFORM" = "linux" ]; then
   ARTIFACT="dist/${SHORT}-v${VER}-linux-${ARCH}.tar.gz"
   PAYLOAD="dist/${SHORT}-v${VER}-linux-${ARCH}"
   ICON_ARG="assets/app.png"
-  BUNDLE_ARG=""
 else
   ARTIFACT="dist/${SHORT}-v${VER}-macos-${ARCH}.zip"
   PAYLOAD="dist/${SHORT}-v${VER}-macos-${ARCH}"
   ICON_ARG="assets/app.icns"
-  BUNDLE_ARG="--osx-bundle-identifier com.serialpid.tuner"
+  # 必须拆成两个数组元素。写成单个含空格的字符串 "--osx-bundle-identifier
+  # com.serialpid.tuner" 时，PyInstaller 的 argparse 会把整串当成一个未知选项，
+  # 连后面的脚本名一起报 "unrecognized arguments"（2026-11-07 出包 macos）。
+  BUNDLE_EXTRA=(--osx-bundle-identifier com.serialpid.tuner)
 fi
 
 echo "[5/8] PyInstaller 打包（onedir / windowed）..."
 PYI_CMD=(
   "$PY" -m PyInstaller --noconfirm --clean --windowed --onedir
+  ${BUNDLE_EXTRA[@]+"${BUNDLE_EXTRA[@]}"}
   --name "$SHORT"
   --paths pc
   --icon "$ICON_ARG"
@@ -163,9 +167,6 @@ PYI_CMD=(
   --hidden-import PySide6.QtWidgets
   pc/main.py
 )
-if [ -n "$BUNDLE_ARG" ]; then
-  PYI_CMD=( "${PYI_CMD[@]:0:6}" "$BUNDLE_ARG" "${PYI_CMD[@]:6}" )
-fi
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "       [dry-run] ${PYI_CMD[*]}"
