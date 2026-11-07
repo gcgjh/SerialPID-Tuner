@@ -9,6 +9,7 @@ venv/
 # 打包产物
 dist/
 build/
+build_sim/
 *.exe
 *.pkg
 # PyInstaller 命令行构建会在工作目录自动生成同名 *.spec，属构建副产物、不入库；
