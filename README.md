@@ -94,7 +94,10 @@ pytest 均**锁定版本**，脚本用 `pip install -r` 安装而不是裸装，
 
 ```powershell
 ..\.venv\Scripts\python.exe scripts\release.py
-# 报告归档：docs\releases\v0.2.0.md（版本 / commit / 测试结果 / 产物 SHA-256）
+# 报告归档：docs\releases\v0.2.0.md（版本 / commit / 构建源 / 测试结果 / 产物 SHA-256）
+
+# 工作区里还有别人的未提交改动时，从 HEAD 的干净副本构建：
+..\.venv\Scripts\python.exe scripts\release.py --clean-tree --allow-dirty
 ```
 
 发布脚本**不自动打 tag、不自动上传**：变更日志与截图由人确认后再发。

@@ -80,6 +80,11 @@
 
 ## 7. 仓库卫生
 
+> 多个任务并行推进同一工作区时，"工作区干净"这条做不到（别人正在写盘）。
+> 此时用 `python scripts/release.py --clean-tree --allow-dirty`：从 HEAD 拉一份干净
+> worktree 跑测试、自检、打包与新鲜度检查，产物只来自已提交源码；报告会列出
+> 未进入产物的改动清单，便于事后核对。
+
 - [ ] **工作区干净**
   - 命令：`git status --short`
   - 判据：无未提交修改、无未跟踪的应入库文件（本地临时脚本、日志、缓存必须清掉；
@@ -101,8 +106,20 @@
 
 - **2026-11-07 第五轮（card26 发布工程）**：版本收敛为 `0.2.0`
   （`__version__` / 版本资源 / CHANGELOG / README 四处一致，并由
-  `test_version_consistency.py` 守护）；积压改动按模块拆分提交并打 `v0.2.0` tag；
-  新增五档 CI（PC 常规 / 长稳 / MCU 主机 / ARM 交叉编译 / 出包 + 新鲜度）；
+  `test_version_consistency.py` 守护）；积压改动按模块拆分提交（9 个提交，历史按
+  模块可读）；新增五档 CI（PC 常规 / 长稳 / MCU 主机 / ARM 交叉编译 / 出包 + 新鲜度）；
   打包依赖锁定 PyInstaller 6.22.3 / Pillow 12.0.0 / pytest 9.2.0；产物改为
   `dist\SerialPID-Tuner-v0.2.0.exe` + 稳定名副本；新增 `scripts/release.py`
   一键发布与 `docs/releases/v0.2.0.md` 报告归档。详见该报告。
+  - **实测**：`release.py --clean-tree` 全流程通过（73.7s）——
+    已提交用例 `171 passed / 6 skipped / 52 subtests`、源码自检 `8 通过 / 0 警告 / 0 失败`、
+    产物 52.6 MB、FileVersion/ProductVersion `0.2.0.0`、
+    新鲜度 `[OK] 晚于最新源码 1.1 分钟`、冒烟存活 3s。
+  - **产物**：`dist\SerialPID-Tuner-v0.2.0.exe`，
+    SHA-256 `1fee8b5730e44c9dc810576631e97635a6c9440d6caea87c99f455aabbba5b11`；
+    tag `v0.2.0` 打在被打包的那个提交 `897dc73` 上。
+  - **口径说明**：本轮发布与 card27/28/29/30 在同一工作区并行执行，报告生成时工作区
+    有 68 项他卡未提交改动。产物只来自 HEAD（已提交源码），这些改动未进入产物——
+    它们的功能会在各自卡片提交后由后续版本打包。工作区当前全量用例为
+    `280 passed / 6 skipped / 52 subtests`（含未提交的新用例），报告里的 171 项
+    是 HEAD 上已提交的那部分。

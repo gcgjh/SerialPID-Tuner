@@ -287,12 +287,21 @@ bash scripts/build.sh      # Linux / macOS
 
 ```powershell
 ..\.venv\Scripts\python.exe scripts\release.py        # 测试 → 自检 → 打包 → 校验 → 冒烟 → 报告
+..\.venv\Scripts\python.exe scripts\release.py --clean-tree --allow-dirty   # 工作区被并行任务占用时
 ..\.venv\Scripts\python.exe scripts\check_artifact_freshness.py --require
 ```
 
-`release.py` 的报告写到 `docs/releases/v<版本>.md`（版本、commit、测试结果、自检结果、
-体积、SHA-256、新鲜度与冒烟结论）。它**不自动 tag、不自动上传**：这两步必须在人确认
-变更日志之后做。
+`release.py` 的报告写到 `docs/releases/v<版本>.md`（版本、commit、构建源、测试结果、
+自检结果、体积、SHA-256、新鲜度与冒烟结论，以及未进入产物的改动清单）。
+它**不自动 tag、不自动上传**：这两步必须在人确认变更日志之后做。
+
+`--clean-tree` 从 `HEAD` 拉一份干净 worktree 来跑测试、自检、打包与新鲜度检查：同一仓库
+里多人 / 多任务并行时，工作区随时是"改了一半"的状态，直接在主树打包会把未提交的半成品
+混进产物。此时构建脚本用 `SERIALPID_PYTHON` 环境变量指向主环境解释器（worktree 里没有
+上一层 `.venv`），由 `release.py` 自动注入；手动在干净副本里构建时也可以自己设。
+
+`--reuse-artifact` 只能用在主树上：worktree 是新 checkout 的，源文件时间全被刷成"现在"，
+和既有产物比时间戳没有意义，脚本会直接拦住这个组合。
 
 ## 7. 持续集成
 
