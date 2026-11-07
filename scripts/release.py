@@ -142,7 +142,7 @@ def step_git(allow_dirty: bool) -> Dict[str, str]:
 
     code, status = _run(["git", "status", "--porcelain"])
     dirty = [
-        line
+        line[3:].strip().strip('"').replace("\\", "/")
         for line in status.splitlines()
         if line.strip() and not _is_release_own_file(line[3:].strip())
     ]
@@ -152,7 +152,7 @@ def step_git(allow_dirty: bool) -> Dict[str, str]:
             "\n".join(dirty),
         )
     _say(f"[2/6] git：{branch} @ {commit}，工作区{'干净' if not dirty else f'有 {len(dirty)} 项改动（已放行）'}")
-    return {"commit": commit, "branch": branch, "dirty": "、".join(dirty) or "无"}
+    return {"commit": commit, "branch": branch, "dirty": dirty}
 
 
 def _is_release_own_file(path: str) -> bool:
@@ -364,6 +364,7 @@ def _render_report(
     fresh: Dict[str, str],
     smoke: str,
     build_source: str,
+    clean: bool,
     started_at: datetime.datetime,
     elapsed: float,
 ) -> str:
@@ -375,18 +376,37 @@ def _render_report(
         f"{version_info.get('ProductVersion', '-')}\n"
         + (f"- LegalCopyright：{version_info.get('LegalCopyright')}\n" if version_info else "")
     )
+    dirty = list(git.get("dirty") or [])
+    dirty_note = (
+        f"工作区有 {len(dirty)} 项未提交改动（见文末「工作区状态」）" if dirty else "工作区干净"
+    )
+    dirty_section = ""
+    if dirty:
+        reason = (
+            "它们属于其它并行任务，未进入本次产物" if clean else "已在 --allow-dirty 下放行，可能进入本次产物"
+        )
+        dirty_section = (
+            f"\n## 工作区状态\n\n报告生成时工作区有 {len(dirty)} 项未提交改动，{reason}：\n\n"
+            + "\n".join(f"- `{path}`" for path in dirty)
+            + "\n"
+        )
+    tests_note = (
+        "\n- 说明：测试在干净 worktree 中运行，只覆盖**已提交**用例；工作区里属于其它并行任务、尚未提交的用例不在其中。"
+        if clean
+        else ""
+    )
     return (
         f"# SerialPID-Tuner v{version} 发布报告\n\n"
         f"> 本文件由 `scripts/release.py` 生成，请随版本入库；**不要手改**。\n\n"
         f"## 结论\n\n"
         f"- 版本：**v{version}**（唯一来源 `pc/serialpid/__init__.py`）\n"
-        f"- 源码：`{git['branch']}` @ `{git['commit']}`；报告生成时工作区改动：{git['dirty']}\n"
+        f"- 源码：`{git['branch']}` @ `{git['commit']}`；{dirty_note}\n"
         f"- 构建源：{build_source}\n"
         f"- 生成时间：{started_at.strftime('%Y-%m-%d %H:%M:%S')}（耗时 {elapsed:.1f}s）\n"
         f"- 解释器：Python {platform.python_version()}（{sys.executable}）\n"
         f"- 平台：{platform.platform()}\n\n"
         f"## 测试\n\n"
-        f"- PC 全量测试：`{tests['summary']}`（{tests['elapsed']}s，`QT_QPA_PLATFORM=offscreen`）\n"
+        f"- PC 全量测试：`{tests['summary']}`（{tests['elapsed']}s，`QT_QPA_PLATFORM=offscreen`）{tests_note}\n"
         f"- 长稳档：未纳入本次发布（另跑 `pytest tests/test_long_run.py --long-run`）\n\n"
         f"## 启动自检（源码环境）\n\n"
         f"- 结果：{selftest['summary']}\n\n"
@@ -404,6 +424,7 @@ def _render_report(
         f"## 未覆盖项\n\n"
         f"- 真机联调未执行（本报告只覆盖 PC 侧离线链路）。\n"
         f"- 自动重连、链路质量统计等 card28 功能不在本版本内。\n"
+        f"{dirty_section}"
     )
 
 
@@ -446,6 +467,12 @@ def main(argv=None) -> int:
             if not artifact.exists():
                 raise StepError(f"--reuse-artifact 指定的产物不存在：{artifact}", "")
             _say(f"[5/6] 跳过打包，复用 {artifact.name}")
+            if worktree is not None:
+                # worktree 是新 checkout 的，源文件 mtime 全被刷成"现在"，和既有产物比时间戳没有意义
+                raise StepError(
+                    "--reuse-artifact 不能与 --clean-tree 同时使用（worktree 的 checkout 会刷新源文件时间，新鲜度无法比对）",
+                    "",
+                )
         else:
             artifact = step_build(version, source_dir)
 
@@ -467,6 +494,7 @@ def main(argv=None) -> int:
                 if worktree is not None
                 else "当前工作区"
             ),
+            clean=args.clean_tree,
             started_at=started_at,
             elapsed=time.time() - started,
         )
