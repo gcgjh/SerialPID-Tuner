@@ -94,6 +94,10 @@ def test_idle_timeout_drops_and_thread_exits() -> None:
 
         thread = core._thread
         assert thread is not None, "线程句柄丢失"
+        # 回调先于线程 return 触发，检查存活要留一个收敛窗口（并发负载下尤其明显）
+        deadline2 = time.monotonic() + 0.5
+        while thread.is_alive() and time.monotonic() < deadline2:
+            time.sleep(0.01)
         assert not thread.is_alive(), "断流后接收线程未退出（线程泄漏）"
 
         cpu = time.process_time() - cpu0
@@ -140,7 +144,12 @@ def test_drop_then_reconnect_keeps_new_connection() -> None:
                 break
             time.sleep(0.02)
         assert connected[-1] == (False, "timeout")
-        assert core._thread is not None and not core._thread.is_alive()
+        thread = core._thread
+        assert thread is not None
+        deadline2 = time.monotonic() + 0.5
+        while thread.is_alive() and time.monotonic() < deadline2:
+            time.sleep(0.01)
+        assert not thread.is_alive(), "断流后接收线程未退出（线程泄漏）"
 
         # 第二轮：重连，旧线程收尾不得关掉新连接
         assert core.open("tcp", f"127.0.0.1:{srv2.port}")

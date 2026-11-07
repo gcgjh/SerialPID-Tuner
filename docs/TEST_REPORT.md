@@ -78,6 +78,8 @@ pwsh mcu\test\run_host_test.ps1
 
 - 命令：仓库根执行 `scripts\build.bat`
 - 结果：构建成功，产物 `dist/SerialPID-Tuner.exe`，约 **52.5 MB**。
+- 复核（2026-11-07，card6）：在仓库临时副本上按上述命令实跑，EXIT 0、耗时约 65 秒，
+  产物 55,060,203 字节（约 52.5 MB），启动冒烟存活 7 秒后手动结束。
 - 工作区副产物：命令行构建会在仓库根自动生成同名 `SerialPID-Tuner.spec`。它是
   PyInstaller 顺手写出的副产物，**不是**构建入口、也不入库（`.gitignore` 已忽略
   `*.spec`）；构建入口只有一键脚本。

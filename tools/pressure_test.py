@@ -429,18 +429,29 @@ def run_reconnect(args) -> Dict[str, Any]:
 
     cycles = max(1, args.cycles)
     timeline: List[Dict[str, Any]] = []
-    base = _snapshot(proc)
-    timeline.append({"cycle": 0, **base})
+    failures = 0
 
     t_wall0 = time.monotonic()
     last_progress = t_wall0
-    failures = 0
+
+    def cycle_once() -> bool:
+        ok = core.open("tcp", target)
+        core.close()
+        return ok
 
     try:
+        # 预热：先跑几轮，把解释器/psutil/socket 一次性分配的句柄摊掉，
+        # 否则基线里混着首轮预热开销，会把"一次性 +3"误读成每轮泄漏。
+        warm = min(10, cycles)
+        for _ in range(warm):
+            cycle_once()
+        time.sleep(0.2)
+        base = _snapshot(proc)
+        timeline.append({"cycle": 0, **base})
+
         for i in range(1, cycles + 1):
-            if not core.open("tcp", target):
+            if not cycle_once():
                 failures += 1
-            core.close()
             if i % 10 == 0:
                 snap = _snapshot(proc)
                 timeline.append({"cycle": i, **snap})
@@ -458,11 +469,11 @@ def run_reconnect(args) -> Dict[str, Any]:
     finally:
         core.close()
         server.close()
-
     elapsed = time.monotonic() - t_wall0
     return {
         "mode": "reconnect",
         "cycles": cycles,
+        "warmup_cycles": warm,
         "failures": failures,
         "wall_s": elapsed,
         "ms_per_cycle": elapsed * 1000.0 / cycles,
