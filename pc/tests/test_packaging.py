@@ -306,7 +306,10 @@ def test_release_body_lists_three_platforms_in_order(tmp_path):
 
     body = out.read_text(encoding="utf-8")
     assert body.startswith(f"# SerialPID-Tuner v{version}")
-    rows = [line for line in body.splitlines() if line.startswith("| ") and "SerialPID-Tuner-v" in line]
+    # 只数「## 下载」这一节的表：后面拼进来的 docs/releases 报告自带表格，
+    # 里面同样会出现 `SerialPID-Tuner-v*` 行，按整篇筛会把它们一起数进来。
+    download = body.split("## 下载", 1)[1].split("## 首次运行", 1)[0]
+    rows = [line for line in download.splitlines() if line.startswith("| ") and "SerialPID-Tuner-v" in line]
     assert [row.split("|")[1].strip() for row in rows] == ["Windows", "Linux", "macOS"]
     assert "pass · 8 通过" in body and "pass · 7 通过" in body
     for name in (".exe", "-linux-x86_64.tar.gz", "-macos-arm64.zip"):
