@@ -60,11 +60,9 @@ jobs:
 
   pc-tests-cross:
     name: PC 测试（跨平台观测 ${{ matrix.os }}）
-    # 说明：这条 job 是第一手跨平台证据。代码层虽然按平台分支过（config 目录、
-    # Qt 插件名、串口后端），但测试里仍可能藏着 Windows 假设（COM 排序、字体、
-    # 路径分隔符）。首轮先当观测项，红了先判断是测试假设还是实现缺陷，
-    # 修干净后再把 continue-on-error 摘掉转成硬门槛。
-    continue-on-error: true
+    # 2026-11-07 首跑时这条还是 continue-on-error 的观测项，红了两处平台假设
+    # （字体度量、num_handles 只存在于 Windows）。两处都按平台修掉后转成硬门槛：
+    # 矩阵红就是红，不许用 continue-on-error 把红叉藏进"workflow success"。
     strategy:
       fail-fast: false
       matrix:
@@ -79,16 +77,26 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: pc/requirements-dev.txt
-      - name: 安装 Qt 运行库与中文字体（Ubuntu）
+      - name: 安装 Qt 运行库、中文字体与 xvfb（Ubuntu）
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 \
-            libxcb-cursor0 fonts-noto-cjk
+            libxcb-cursor0 fonts-noto-cjk xvfb
       - name: 安装依赖（requirements-dev.txt 锁定版本）
         run: python -m pip install -r pc/requirements-dev.txt
-      - name: 运行 PC 全量测试
+      # 同一个 pytest 命令，Linux 前面加 xvfb-run：offscreen 插件在这个 runner 上
+      # 会随机崩（2026-11-07 首跑在跑完后 Bus error，二跑在 57% 处 Segmentation fault，
+      # 两次都只发生在 ubuntu）。xcb 走的是真实窗口系统与字体栈，也和用户机器一致。
+      - name: 运行 PC 全量测试（Linux：xvfb + xcb）
+        if: runner.os == 'Linux'
+        working-directory: pc
+        env:
+          QT_QPA_PLATFORM: xcb
+        run: xvfb-run -a -s "-screen 0 1280x1024x24" python -m pytest tests -q
+      - name: 运行 PC 全量测试（macOS：offscreen）
+        if: runner.os != 'Linux'
         working-directory: pc
         run: python -m pytest tests -q
 

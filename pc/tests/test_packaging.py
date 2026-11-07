@@ -122,6 +122,17 @@ def test_package_job_is_a_hard_gate_with_freshness_guard():
     assert "%s.json" % "selftest-${{ matrix.platform }}" in body
 
 
+def test_cross_platform_tests_are_a_hard_gate():
+    """跨平台观测矩阵修干净后必须是硬门槛：红叉不能被 continue-on-error 藏掉。"""
+    data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    cross = data["jobs"]["pc-tests-cross"]
+    assert not cross.get("continue-on-error"), "跨平台测试红了就是红，不许允许失败"
+    assert cross["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    body = json.dumps(cross["steps"], ensure_ascii=False)
+    assert "python -m pytest tests -q" in body
+    assert "xvfb-run" in body, "Linux 侧必须走 xvfb（offscreen 在 runner 上会崩）"
+
+
 def test_release_job_only_on_tags_and_can_write_contents():
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     release = data["jobs"]["release"]

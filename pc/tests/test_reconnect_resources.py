@@ -123,6 +123,18 @@ def _wait_sim_threads_gone(expected: set, timeout: float = 3.0) -> set:
     return _sim_thread_ids() & expected
 
 
+def _open_handles(proc) -> int:
+    """进程打开的 OS 资源数：Windows 是句柄，POSIX 是文件描述符。
+
+    ``num_handles()`` 只在 Windows 上存在，macos-latest 上直接 AttributeError
+    （2026-11-07 跨平台观测 job 就红在这一行）。两者是同一类泄漏面，按平台取
+    即可，不要因此把整条重连用例在非 Windows 上跳过。
+    """
+    if hasattr(proc, "num_handles"):
+        return proc.num_handles()
+    return proc.num_fds()
+
+
 def test_fifty_reconnects_do_not_grow_resources(win) -> None:
     import tracemalloc
 
@@ -141,7 +153,7 @@ def test_fifty_reconnects_do_not_grow_resources(win) -> None:
     gc.collect()
 
     receivers_before = _receiver_counts(win)
-    handles_before = proc.num_handles()
+    handles_before = _open_handles(proc)
     threads_before = proc.num_threads()
     started_tm = False
     if not tracemalloc.is_tracing():
@@ -160,7 +172,7 @@ def test_fifty_reconnects_do_not_grow_resources(win) -> None:
     gc.collect()
     _pump(0.1)
 
-    handles_after = proc.num_handles()
+    handles_after = _open_handles(proc)
     threads_after = proc.num_threads()
     mem_after = tracemalloc.get_traced_memory()[0]
     receivers_after = _receiver_counts(win)
@@ -175,7 +187,7 @@ def test_fifty_reconnects_do_not_grow_resources(win) -> None:
 
     growth_mb = (mem_after - mem_before) / (1024.0 * 1024.0)
     print(
-        f"[probe] {CYCLES} 次重连：句柄 {handles_before}→{handles_after}，"
+        f"[probe] {CYCLES} 次重连：句柄/fd {handles_before}→{handles_after}，"
         f"线程 {threads_before}→{threads_after}，Python 内存 "
         f"{mem_before / 1048576.0:.2f}→{mem_after / 1048576.0:.2f} MB，"
         f"信号 receivers {receivers_before}→{receivers_after}，"
