@@ -1,0 +1,4 @@
++5.27s max_interval_ms=10 ticks=500 target_ms=10
++10.77s max_interval_ms=10 ticks=1000 target_ms=10
++15.77s max_interval_ms=10 ticks=1500 target_ms=10
++20.77s max_interval_ms=10 ticks=2000 target_ms=10
