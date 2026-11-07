@@ -6,9 +6,82 @@
 `README.md` 的当前版本行与 `scripts/version_info.txt` 都由它派生，
 `pc/tests/test_version_consistency.py` 负责在测试里守住这条。
 
-## [Unreleased]
+## [0.2.1] - 2026-11-07
 
-（暂无。下一轮改动先写在这里，发版时整体提升为 `## [X.Y.Z] - 日期`。）
+本版把 v0.2.0 之后仍滞留工作区的成果一次性入库：内置模拟器引擎与故障注入、
+端口三态诊断与启动自检、主动心跳与链路质量 / 帧日志回放（card28）、
+帮助 / 关于 / 首启向导与统一三段式文案（card30）、六张标准截图与文档索引。
+v0.2.0 的发布报告只覆盖当时**已提交**的 171 项用例；v0.2.1 的报告基于干净
+worktree 的全量 `447 passed / 6 skipped / 52 subtests`，与仓库内容一致。
+
+第六轮「通信可靠性」（card28）：主动心跳、链路质量统计、ERROR 码中文化、断线原因分类、
+可选自动重连、帧级日志导出与回放。全量 `447 passed / 6 skipped / 52 subtests`
+（其中 card28 新增 74 项：`test_link_stats.py` / `test_frame_trace.py` /
+`test_heartbeat.py` / `test_link_ui.py`）。
+
+### 新增
+
+- **主动心跳**：PC 每 1.0 s 发 `PING`，用 `PONG` 到达算往返时延（FIFO 结账，避免把刚发的
+  PING 当基准把 RTT 算成 0）。判死条件是"连续 3 次无 PONG **且**同窗口没有任何帧"——
+  "固件忙到没回 PONG 但仍在发遥测"只降级为质量提示，不判死。心跳间隔 / 次数 /
+  兜底窗口 / 帧日志容量可在 `config.json` 的 `comm` 段配置；`heartbeat_interval_s = 0`
+  退回到纯空闲断流判定，库默认仍是关闭（不干扰纯逻辑测试）。
+- **链路质量统计**（`link_stats.py`）：收 / 发 / 坏帧 / 约丢帧计数、窗口帧率、字节速率、
+  RTT 均值 · 最大 · 抖动、心跳欠账、会话时长，按 坏帧 > 丢帧 > 坏帧存在 > 丢帧 >
+  心跳欠账 > 抖动 > 帧率跌落 的优先级判 绿 / 黄 / 红。丢帧按设备 u32 时间戳间隔推算：
+  差值 ≥ 2³¹ 判为设备复位（只挪基准、不计丢帧），计数器回绕按模运算继续。
+- **状态栏质量指示**（`gui/link_status.py`）：一个灯 + 帧率 / RTT / 约丢三个数字，1 Hz 刷新；
+  悬停给出完整统计与口径（"约丢"是推断值不是精确计数），坏帧计数仍在右侧。
+- **ERROR 码中文化**（`protocol.py`）：`ERROR_CATALOG` 与固件 `pid_err_code_t` 逐项对齐
+  （`0x00`–`0x06`），日志输出"数字 + 含义 + 固件原话 + 建议动作"；表外码显示
+  "未定义的错误码 0xNN"并保留原话，不做猜测。
+- **断线原因分类**（`comm.py`）：八类原因常量（`timeout` / `heartbeat-timeout` /
+  `peer-closed` / `device-removed` / `driver-error` / `write-error` / `read-error` /
+  `closed`），每类配"现象 + 下一步"两段中文；串口异常按关键字归类（拒绝访问 / 拔出 →
+  `device-removed`，ClearComm / 句柄 → `driver-error`）。旧 `timeout` 串保持不变。
+- **可选自动重连**：默认关闭；开启后按 1 / 2 / 5 / 10 s、之后每分钟重试，最多 7 次，
+  状态栏显示"第 N 次，X s 后"，成功 / 失败 / 放弃都写日志。默认关的理由：静默重连会把
+  "设备掉线"伪装成"一直连不上"，调试时最需要看见的就是掉线。
+- **帧级日志与回放**（`frame_trace.py` + `gui/frame_log_dialog.py`）：2000 帧环形缓冲
+  （超出丢最旧并计入"已滚出"）；导出文本（给人看）与 JSONL（一行一帧：
+  `t/dir/type/name/len/payload`，不含端口号与路径）；读回时坏行**抛 ValueError 带行号**，
+  不静默跳过；回放只放 rx 帧，支持 0.5×–10× 倍速与单步，基准取第一条帧。
+
+### 变更
+
+- `TcpTransport.read` 区分"对端 FIN"与"读超时"：新增 `PeerClosed`。此前 `recv()` 返回空字节
+  与超时一样返回 `b""`，"对端程序正常退出"会被误报成"链路超时"；其它 `OSError` 统一包成
+  `OSError("TCP 读失败: …")` 交由通信层归类。
+- 日志里的 `ERROR code=N msg=…` 改为中文可读行（含义 / 固件原话 / 建议）。
+- `PONG` 不再每秒刷一行日志（心跳 1 Hz 下会淹没现场）：只记"第一次通"与"状态变化"。
+
+### 文档
+
+- `docs/PROTOCOL.md`：§3 第 7 条更新为心跳判活（复用已冻结的 `0x01/0x02`，帧格式不变）；
+  §4.1 补心跳间隔 / 判死条件 / 兜底口径与 RTT 结账规则；新增 §4.2 ERROR 码表。
+- `docs/user_guide.md`：新增"看链路质量""心跳与掉线提示""断线自动重连为什么默认关"
+  "帧日志与回放"四节，界面分区表补状态栏与「工具」菜单。
+- `docs/BUGS.md`：B-05 的"链路质量统计"、B-07 的"链路级看门狗"标记为已补齐；
+  命令级 `PID_ACK` 应答超时仍保留观察。
+
+### 体验与文档（card30）
+
+- **六张标准截图**：`tools/make_screenshots.py` 一条命令离屏重生成 `docs/images/` 下六个固定文件名
+  （主界面 / 模拟器 / 端口诊断 / 自检横幅 / 阶跃指标 / 状态栏）；脚本显式加载系统中文字体，避免方块。
+  另有 `tools/make_wiring_diagram.py` 生成 USB-TTL 接线示意图。README 顶部放前两张，其余按章节引用。
+- **内置帮助**（`gui/help_dialog.py`）：F1 打开，三节「五分钟上手 / 界面速查 / 常见问题」
+  直接从 `docs/user_guide.md` 抽取渲染，不另写一份；手册缺失时退回内置精简文案；手册大图按窗口宽度缩放。
+- **关于框**（`gui/about_dialog.py`）：程序版本（单一来源 `__version__`）、Python / 操作系统、
+  PySide6 / pyqtgraph / pyserial / numpy 版本、MIT 许可证，以及「复制诊断信息」到剪贴板。
+- **首启三屏向导**（`gui/onboarding.py`）：仅在无配置文件时出现（通道 → 连接 → 看到曲线），
+  可跳过；跳过 / 走完 / 直接关窗都写 `ui.onboarding_done`，不会第二次连弹。
+- **错误提示三段式**（`messages.py`）：连接失败、坏帧（原"解析异常"）、自检失败、端口为空
+  统一为「现象 / 原因 / 下一步」；状态栏只显示"坏帧 N"，完整解释放悬停与日志；CSV / 帧日志
+  导出失败、阶跃分析失败同样照此改写，去掉内部编号与术语。
+- 文档：手册新增「五分钟上手」「术语表」与逐章配图，`docs/wiring.md` 增接线示意，
+  新建 `docs/INDEX.md` 串起协议 / 开发 / 接线 / 压测 / 发布。
+- 测试：新增 `test_messages.py` / `test_help_dialog.py` / `test_about_dialog.py` /
+  `test_onboarding.py` / `test_screenshots.py` 共 34 例；全量 `447 passed / 6 skipped / 52 subtests`。
 
 ## [0.2.0] - 2026-11-07
 

@@ -166,3 +166,28 @@ pwsh mcu\test\run_host_test.ps1
 python tools\fake_mcu.py --port 9000
 cd pc; python -m serialpid.main
 ```
+
+## 8. 卡30 体验与文档（本轮新增）
+
+新增五个用例文件，共 34 例；全量回归：
+
+```powershell
+cd pc; python -m pytest tests -q
+# 447 passed, 6 skipped, 52 subtests passed in 21.95s
+```
+
+| 文件 | 例数 | 覆盖 |
+| --- | --- | --- |
+| `tests/test_messages.py` | 10 | 三段式 block/line、串口失败按 errno 分类（不看 pyserial 统一前缀）、空端口/枚举失败、坏帧数量与帧名、自检失败优先、拼句工具 |
+| `tests/test_help_dialog.py` | 8 | 编号标题抽取与子标题归属、拼装顺序去编号、找不到退兜底、真手册能抽出三节、对话框渲染、1440px 截图缩到 820、主窗口帮助菜单 + F1 + 两个构造入口 |
+| `tests/test_about_dialog.py` | 5 | 版本单一来源、环境清单覆盖面、未安装依赖如实报"未安装"、诊断文本结构、复制进剪贴板 |
+| `tests/test_onboarding.py` | 6 | 三页与按钮文案、跳过记住、关窗也记住、remember 幂等落盘、第二次不再弹 |
+| `tests/test_screenshots.py` | 5 | 六个文件名冻结、仓库图在位、`capture_all` 真渲染六图且可读、`--only` 过滤、接线图尺寸 |
+
+同时修改了两个既有断言文件（状态栏由"解析异常 N"改"坏帧 N"）：
+`test_window_layout.py`、`test_ui_defects.py`；`ParseErrorLogger` 内部首行仍保留
+"解析异常 type=0x20 …"，属诊断日志、不面向用户。
+
+字体坑复验：离屏渲染必须显式 `QFontDatabase.addApplicationFont("C:/Windows/Fonts/msyh.ttc")`，
+否则 `QFontDatabase.families()` 为空、中文全成方块；截图脚本与接线图脚本都已加，
+新增 GUI 用例统一在构造控件前先建 `QApplication`（顺序错会 abort，退出码 -1073740791）。

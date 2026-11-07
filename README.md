@@ -1,15 +1,21 @@
 # SerialPID-Tuner
 
+<p align="center">
+  <img src="docs/images/01-main-window.png" alt="主界面：左侧参数 / 阶跃 / 指标 / 日志，右侧 SP-PV 与 OUT 曲线" width="49%">
+  <img src="docs/images/02-sim-panel.png" alt="内置模拟器与仿真对象参数面板" width="49%">
+</p>
+
 开源串口 PID 调试上位机 + 配套 STM32 固件：PySide6 + pyqtgraph + pySerial 上位机，
 经二进制串口协议与 MCU 通信，支持实时曲线、PID 参数下发与回显、阶跃响应测试、
 Ziegler-Nichols 辅助整定、CSV 曲线导出；MCU 侧提供零 HAL 依赖的协议层 / PID 算法层 /
 应用层，以及 STM32 HAL 集成示例。
 
 > 协议字节布局已冻结，见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（v1.0）。
-> 当前版本：**0.2.0**（离线闭环验收版）：PC 全链路 + MCU 主机侧离线测试通过；
-> 实物烧录联调列入 v0.3。
+> 当前版本：**0.2.1**（离线闭环 + 内置模拟器体验版）：PC 全链路、内置模拟器与
+> 帮助 / 引导齐备，MCU 主机侧离线测试通过；实物烧录联调列入 v0.3。
 > 版本号的唯一来源是 `pc/serialpid/__init__.py` 的 `__version__`，本行与
 > [`docs/CHANGELOG.md`](docs/CHANGELOG.md)、exe 文件属性都由它派生。
+> 不知道该读哪篇文档时，从 [`docs/INDEX.md`](docs/INDEX.md) 进。
 
 ## 功能
 
@@ -23,7 +29,10 @@ Ziegler-Nichols 辅助整定、CSV 曲线导出；MCU 侧提供零 HAL 依赖的
 - **Z-N 辅助整定**：临界振荡法 / 反应曲线法两套经典公式，纯 PC 侧计算，
   选定后经既有 `PID_SET` 帧下发。
 - **日志导出**：遥测曲线导出 CSV（UTF-8 带 BOM，Excel 直开）；日志面板在内存保留最近事件记录。
-- **离线模拟器**：无硬件时用 TCP 模拟器（一阶惯性植物 + 简易 PID）跑通全流程。
+- **离线模拟器**：无硬件时用 TCP 模拟器（一阶惯性植物 + 简易 PID）跑通全流程；
+  界面里还内置一个进程内模拟器（选「内置模拟器」即可，无需另开进程）。
+- **上手不靠猜**：F1 内置帮助（内容与用户手册同源）、首启三屏向导、关于框里能
+  复制诊断信息；所有失败提示统一成「现象 / 原因 / 下一步」三段式。
 - **深色主题**：内置统一配色的深色界面，曲线颜色与面板配色集中在 `gui/theme.py`。
 
 ## 快速开始
@@ -161,12 +170,17 @@ SerialPID-Tuner/
 │       ├── zn_tuning.py          # Z-N 整定公式与反应曲线辨识
 │       ├── csv_export.py         # CSV 导出
 │       ├── config.py             # 参数输入范围配置（config.json 读写与回落）
+│       ├── messages.py           # 统一提示文案：现象 / 原因 / 下一步三段式
 │       ├── frame_log.py           # 未知类型帧聚合计数日志
+│       ├── link_stats.py          # 链路质量统计（帧率 / RTT / 丢帧 / 坏帧占比）
 │       ├── preset_manager.py     # PID 预设 JSON 管理
 │       ├── port_scan.py          # 串口端口三态诊断（超时保护 + 可粘贴诊断文本）
 │       ├── selftest.py           # 启动自检与依赖诊断（八项三态报告）
 │       ├── sim/                  # 进程内仿真：植物 / 协议会话 / 传输
 │       └── gui/                  # 主窗口 / 曲线 / 参数 / 阶跃 / Z-N / 日志 / 仿真面板
+│           ├── help_dialog.py     # F1 帮助（从 user_guide.md 抽三节渲染）
+│           ├── about_dialog.py    # 关于框：版本 / 依赖 / 许可证 / 复制诊断
+│           └── onboarding.py      # 首次运行三屏向导（可跳过、只弹一次）
 ├── mcu/                         # 固件（协议层 / 算法层 / 应用层 + HAL 示例）
 │   ├── Inc/  Src/
 │   │   ├── pid_comm.*            # 协议解析 / 组帧 / CRC / 环形缓冲（无 HAL）
@@ -179,20 +193,25 @@ SerialPID-Tuner/
 │   ├── fake_mcu.py               # 离线 TCP 模拟器
 │   ├── gen_protocol_vectors.py   # 从 PC 协议生成 MCU 黄金向量
 │   ├── make_icon.py              # 生成应用图标
+│   ├── make_screenshots.py       # 离屏生成六张标准界面截图（docs/images）
+│   ├── make_wiring_diagram.py    # 生成 USART1 接线示意图
 │   └── make_version_info.py      # 从 __version__ 生成 Windows 版本资源
 ├── scripts/                      # 打包 / 发布 / 产物校验脚本与 Windows 版本资源
 ├── .github/workflows/ci.yml      # 五档 CI：PC / 长稳 / MCU / ARM / 出包
 ├── assets/                       # 图标等随包资源
 └── docs/
+    ├── INDEX.md                  # 文档索引（想了解什么该读哪篇）
     ├── PROTOCOL.md               # 冻结协议基准 v1.0
-    ├── user_guide.md             # 上位机使用手册
+    ├── user_guide.md             # 上位机使用手册（含五分钟上手 / 界面速查 / 术语表）
     ├── development.md            # 二次开发与分层 / 线程模型
     ├── PC_TOOLS_API.md           # PC 侧函数级接口说明
     ├── wiring.md                 # 硬件接线与 IO 回调映射
+    ├── bringup.md                # 从零上电联调八步与故障排查
     ├── ITERATION.md              # 迭代路线与风险
     ├── TEST_REPORT.md            # 验收测试报告
     ├── BUGS.md                   # 已知问题与限制清单
     ├── RELEASE_CHECKLIST.md      # 发布前检查清单
+    ├── images/                   # 手册与 README 引用的截图 / 示意图
     ├── releases/                 # 每版本一份发布报告（release.py 生成）
     └── CHANGELOG.md              # 变更记录
 ```
@@ -212,10 +231,11 @@ SerialPID-Tuner/
 ## 路线图
 
 - **v0.1 基础闭环**（已完成）：协议冻结、PC 通信 / GUI / 模拟器、MCU 协议与算法主机测试。
-- **v0.2 离线增强与发布工程**（当前）：内置仿真面板、端口诊断、启动自检、预设管理接入；
-  版本号单一来源、五档 CI、一键发布脚本与产物新鲜度判据。
-- **v0.3 可靠性 + 真机**：主动心跳与链路质量统计、仿真故障注入 / 录制回放、
-  实物烧录联调与上板自测序列、截图与内置帮助。
+- **v0.2 离线增强与发布工程**（当前）：内置仿真面板、端口诊断、启动自检、预设管理、
+  心跳与链路质量、帧日志 / 回放、统一三段式提示、F1 帮助 / 关于 / 首启向导、
+  标准截图与接线示意图；版本号单一来源、五档 CI、一键发布脚本与产物新鲜度判据。
+- **v0.3 可靠性 + 真机**：仿真故障注入 / 录制回放增强、实物烧录联调与上板自测序列、
+  长时间长稳报告。
 
 详见 [`docs/ITERATION.md`](docs/ITERATION.md)。
 
