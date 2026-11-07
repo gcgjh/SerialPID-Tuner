@@ -116,15 +116,30 @@ LEDC 选 GPIO2 是为了"不接线也能看见输出"；接真实执行器时改
 
 ## 7. 烧录：本机这块板必须手动按 BOOT
 
-这块 ESP32 的 CH340 DTR/RTS 自动下载电路不工作，直接 `idf.py flash` 会报
-`Wrong boot mode detected (0x13)`。流程：
+这块 ESP32 的 CH340 DTR/RTS 自动下载电路不工作，直接 `idf.py flash`（默认
+`--before=default-reset`）实测报 `Failed to connect to ESP32: No serial data received`。
+流程：
 
 1. **按住 BOOT（IO0）不松手**，同时**按一下 RST/EN 再松开**（BOOT 保持按住）；
-2. 确认板子已进下载模式后执行 `build.ps1 flash -Port COM5`；
-3. 烧完松开 BOOT，按一下 RST 让新固件跑起来。
+2. 确认板子已进下载模式后，用 esptool 直连烧（**必须 `--before=no-reset`**，别再让 DTR 复位一次，
+   否则刚进的下载模式会被打断）：
+
+```powershell
+. "C:\Espressif\tools\Microsoft.v6.0.1.PowerShell_profile.ps1" | Out-Null
+Set-Location C:\SerialPID-esp32\mcu\esp32\build
+esptool --chip esp32 -p COM5 -b 460800 --before=no-reset --after=hard-reset write-flash `
+  --flash-mode dio --flash-freq 40m --flash-size 4MB 0x1000 bootloader\bootloader.bin `
+  0x8000 partition_table\partition-table.bin 0x10000 serialpid_tuner_fw.bin
+```
+
+3. 看到三段 `Hash of data verified` 后松开 BOOT；若此时串口一片静默，说明芯片还停在下载模式
+   （BOOT 没松开），按一下 RST 即可正常启动。
+
+烧完别用 `build.ps1 flash` 复核：它走的是 `default-reset`，在这块板上一半概率连不上。
 
 串口还被上位机（SerialPID-Tuner 界面）占用时烧不进去：先断开界面里的"连接"，
-或者直接用脚本 / `tools/bringup_check.py` 走串口，不经过 GUI。
+然后跑 `python tools/esp32_bringup.py --port COM5 --seconds 20`（加 `--nvs` 多做一步参数快照复验），
+不经过 GUI。
 
 ## 8. 已验证 / 未验证（诚实边界）
 
