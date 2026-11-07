@@ -1,7 +1,9 @@
 """PID 参数面板：参数输入、下发、ACK 回显、预设管理。
 
 预设（``preset_manager``）接在面板内部，不经主窗口：
-    * 保存 / 加载 / 管理三件事都在这一行控件里，只占一行高度；
+    * 保存 / 加载 / 管理三件事收进一个「预设…」菜单按钮（卡20），行内只留
+      「下拉框 + 菜单按钮」，面板高度不增加；原先四个控件挤一行时下拉只剩
+      半截文字、三个按钮各约 40 px，误点"保存"会覆盖正在调的那组；
     * **加载只填界面输入框，绝不自动下发**——板子上可能正跑着一组能用的
       参数，直接写进去会让现场设备失控，这是安全边界不是交互偏好；
     * 预设文件与 ``config.json`` 同目录（含 ``SERIALPID_CONFIG`` 覆盖与便携
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QVBoxLayout,
@@ -188,52 +191,60 @@ class ParamPanel(QWidget):
         self._sp = self._spin(sp["min"], sp["max"], sp["default"], sp["step"])
 
         form = QFormLayout()
+        # 输入框横向撑满表单（卡20）：默认策略按建议宽度摆放，340 px 面板里
+        # 右侧会空出约 100 px，看着像"还有控件没显示"。
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.addRow("Kp", self._kp)
         form.addRow("Ki", self._ki)
         form.addRow("Kd", self._kd)
         form.addRow("SP", self._sp)
 
-        # ---- 预设（卡13）：一行控件，不撑大面板 ----
+        # ---- 预设（卡13 接入 / 卡20 排布）：一行控件，高度不增 ----
         self._presets = PresetManager(
             presets_path if presets_path is not None else presets_path_for(config_path)
         )
         self._loaded_name: Optional[str] = None
 
         self._preset_box = QComboBox(self)
-        self._preset_box.setMinimumWidth(96)
         self._preset_box.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        self._preset_box.setMinimumContentsLength(6)
+        # 不按最长条目定宽：面板只有 340 px，优先让名字在行内显示完整
+        self._preset_box.setMinimumContentsLength(8)
         self._preset_box.setToolTip("选择一组已保存的预设；只填界面，不会自动下发")
-        self._preset_save = QPushButton("保存", self)
-        self._preset_save.setToolTip("把当前界面上的 Kp/Ki/Kd/SP 存成一组预设")
-        self._preset_load = QPushButton("加载", self)
-        self._preset_load.setToolTip("把预设数值填进输入框，需再点「下发 PID 参数」才写到板子")
-        self._preset_manage = QPushButton("管理", self)
-        self._preset_manage.setToolTip("删除 / 重命名已有预设")
-        # 左侧栏固定 340 宽：三个按钮各限 46 像素，保证下拉框还有可读宽度
-        for button in (self._preset_save, self._preset_load, self._preset_manage):
-            button.setMaximumWidth(46)
+
+        # 三个动作收进一个菜单按钮（卡20 方案二）：
+        #   原来"下拉 + 保存 + 加载 + 管理"挤一行，下拉被压到只剩前半截，
+        #   三个按钮各约 40 px 紧邻，误点"保存"会覆盖正在调的那组参数。
+        #   收进菜单后行内只需"下拉 + 一个按钮"，面板高度不增加。
+        self._preset_menu_btn = QPushButton("预设…", self)
+        self._preset_menu_btn.setToolTip("保存当前参数 / 加载选中预设 / 管理（删除、重命名）")
+        self._preset_menu_btn.setMaximumWidth(80)
+        preset_menu = QMenu(self._preset_menu_btn)
+        self._preset_action_save = preset_menu.addAction("保存当前参数…")
+        self._preset_action_load = preset_menu.addAction("加载选中预设（只填界面）")
+        self._preset_action_manage = preset_menu.addAction("管理预设（删除 / 重命名）…")
+        self._preset_menu_btn.setMenu(preset_menu)
 
         preset_row = QHBoxLayout()
         preset_row.addWidget(self._preset_box, 1)
-        preset_row.addWidget(self._preset_save)
-        preset_row.addWidget(self._preset_load)
-        preset_row.addWidget(self._preset_manage)
+        preset_row.addWidget(self._preset_menu_btn)
 
         self._preset_status = QLabel("", self)
         self._preset_status.setWordWrap(True)
         self._preset_status.setStyleSheet("color: #888;")
 
         self._apply_pid = QPushButton("下发 PID 参数")
+        self._apply_pid.setToolTip("把界面上的 Kp/Ki/Kd/SP 打包下发")
         self._apply_sp = QPushButton("仅下发 SP")
-        self._ack_label = QLabel("未收到 ACK")
+        self._apply_sp.setToolTip("只把设定值下发到板子，不动 PID 增益")
+        self._ack_label = QLabel("未下发")
         self._ack_label.setStyleSheet("color: #888;")
 
+        # 两个下发按钮等宽（卡20）：等拉伸，不用固定宽度——换字体 / 换语言也不会不齐
         btn_row = QHBoxLayout()
-        btn_row.addWidget(self._apply_pid)
-        btn_row.addWidget(self._apply_sp)
+        btn_row.addWidget(self._apply_pid, 1)
+        btn_row.addWidget(self._apply_sp, 1)
 
         box = QGroupBox("PID 整定")
         box_layout = QVBoxLayout(box)
@@ -248,9 +259,9 @@ class ParamPanel(QWidget):
 
         self._apply_pid.clicked.connect(self._send_pid)
         self._apply_sp.clicked.connect(self._send_sp)
-        self._preset_save.clicked.connect(self._save_preset)
-        self._preset_load.clicked.connect(self._load_preset)
-        self._preset_manage.clicked.connect(self._manage_presets)
+        self._preset_action_save.triggered.connect(lambda *_: self._save_preset())
+        self._preset_action_load.triggered.connect(lambda *_: self._load_preset())
+        self._preset_action_manage.triggered.connect(lambda *_: self._manage_presets())
 
         if warning:
             self._ack_label.setText(f"配置：{warning}")
@@ -264,7 +275,8 @@ class ParamPanel(QWidget):
         if self._presets.warning:
             self._set_status(f"预设：{self._presets.warning}", warn=True)
         else:
-            self._set_status(f"未加载预设（已保存 {len(self._presets.names())} 组）")
+            # 「已保存 N 组」挪进下拉的 tooltip（卡20）：状态行只留"当前在用什么"
+            self._set_status("未加载预设")
 
     # ---- 通用 ----
 
@@ -290,17 +302,25 @@ class ParamPanel(QWidget):
         return self._presets.names()
 
     def refresh_presets(self, select: Optional[str] = None) -> None:
-        """重建下拉框；``select`` 指定选中项（不存在则忽略）。"""
+        """重建下拉框；``select`` 指定选中项（不存在则忽略）。
+
+        显示文本只放名称（卡20）：长文本会把下拉压成半截，「已保存 N 组」
+        这类计数信息挪到 tooltip；空列表给占位「未选择预设」而不是「（无预设）」，
+        避免用户以为选错了什么。
+        """
         names = self._presets.names()
         self._preset_box.blockSignals(True)
         self._preset_box.clear()
         if names:
             self._preset_box.addItems(names)
         else:
-            self._preset_box.addItem("（无预设）")
+            self._preset_box.addItem("未选择预设")
         self._preset_box.blockSignals(False)
-        self._preset_load.setEnabled(bool(names))
-        self._preset_manage.setEnabled(bool(names))
+        self._preset_box.setToolTip(
+            f"已保存 {len(names)} 组预设；选择后走「预设…→加载选中预设」只填界面，不会自动下发"
+        )
+        self._preset_action_load.setEnabled(bool(names))
+        self._preset_action_manage.setEnabled(bool(names))
         if select:
             index = self._preset_box.findText(select)
             if index >= 0:
@@ -477,9 +497,25 @@ class ParamPanel(QWidget):
     def _send_pid(self) -> None:
         payload = pack_pid_set(self._kp.value(), self._ki.value(), self._kd.value(), self._sp.value())
         self._worker.send(PacketType.PID_SET, payload)
+        self._mark_sent("PID 参数")
 
     def _send_sp(self) -> None:
         self._worker.send(PacketType.SP_SET, pack_sp_set(self._sp.value()))
+        self._mark_sent("设定值 SP")
+
+    def _mark_sent(self, what: str) -> None:
+        """下发后更新状态行（卡20）：没连上就明说"没发出去"，不用"等待 ACK"糊弄。
+
+        颜色与含义一一对应：橙＝没发出去，灰＝已发等待应答，绿＝ACK 接受（带回显），
+        红＝ACK 拒绝。
+        """
+        connected = bool(getattr(self._worker, "connected", False))
+        if connected:
+            self._ack_label.setText(f"{what} 已下发，等待 ACK…")
+            self._ack_label.setStyleSheet("color: #888;")
+        else:
+            self._ack_label.setText(f"未连接：{what} 未下发")
+            self._ack_label.setStyleSheet("color: #e67e22;")
 
     def current_sp(self) -> float:
         """当前界面上的设定值（供其它面板组 PID_SET 时复用）。"""

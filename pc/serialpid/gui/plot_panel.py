@@ -1,5 +1,15 @@
 """实时曲线面板：上半 SP/PV，下半 OUT。
 
+v5（card17 修复 · 图例 / 轴标签 / 空态 / 工具条文案）：
+  上一版图例是隐形底黑，本轮查明还有一层原因：``addLegend()`` 在两条曲线
+  之后才调用，先建的曲线根本没进图例。现在图例先建、再建曲线，并显式用
+  主题色（面板色半透明底、描边色边框、正文亮色文字），深浅两套主题都不
+  再依赖绘图库给浅色背景准备的默认样式。
+  轴标签统一从 ``config.plot_units`` 取单位（sp/pv 过程量、out 输出、时间 s），
+  上图补上下两轴的标签，下图补左轴；两图横轴继续由工具的联动逻辑共享。
+  空态单独分支：无数据时隐藏纵轴、横轴固定 0–10s、居中提示「等待数据」，
+  不再让绘图库给一条 0–1 的假刻度；第一帧数据到达即撤掉提示、还原坐标轴。
+
 v4（card11 修复 · 时间轴回绕 / 复位）：
   内部横轴不再是"当前样本原始毫秒 - 首个样本毫秒"（那个式子隐含"时间戳永不
   回退、永不过 32 位边界、基准永远有效"三个前提，真实硬件三样都不成立）。
@@ -15,9 +25,9 @@ v3（card7 修复 · 横轴缩放救回）：
   横轴有"跟随 / 自由"两种模式，与纵轴自动/手动、暂停互不相干：
     * 跟随：每帧按时间窗滚动横轴（旧行为），适合实时盯盘；
     * 自由：横轴完全交给用户。用鼠标滚轮 / 拖动 / 框选缩放即自动进入
-      "已暂停跟随"，横轴不再被每帧设定，放大看超调段不会弹回。
+      "自由查看"，横轴不再被每帧设定，放大看超调段不会弹回。
   工具条：跟随最新（一键恢复滚动）、适应全部（横轴拉到全量数据）、
-  以及"已暂停重绘 / 已暂停跟随"组合状态显示。
+  以及"已暂停重绘 / 跟随中|自由查看"组合状态显示。
   自由模式下按用户视口切片再抽稀（视口内保持全分辨率）；视口若落在已被
   队列淘汰的区间，自动把视口跟到数据前沿并给出提示，不会静默变白。
 
@@ -43,11 +53,13 @@ v2（card2 修复）：
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import os
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -58,7 +70,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import DEFAULT_PLOT_UNITS, default_config_path, load_config
 from ..model import TelemetryBuffer, TelemetrySample
+from .theme import COLORS
 
 _UNSET = object()  # 区分"未传参"与"显式传 None(=全部窗口)"
 
@@ -71,8 +85,33 @@ _U32_MASK = _U32_SPAN - 1
 # 这个门槛把两者分开——千万不要改成"取模"：复位时取模会得到一个巨大的正数。
 _WRAP_GUARD = 1 << 31
 
-_FOLLOW_COLOR = "#888888"
-_FREE_COLOR = "#e6a23c"
+# 空态的横轴固定跨度（秒）：给一个"还没开始计时"的合理量程，而不是 0–1 假刻度。
+_EMPTY_X_SPAN = 10.0
+
+
+def _resolve_units(overrides: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """取坐标轴单位：显式参数 > ``config.json`` 的 ``plot_units`` > 默认。
+
+    只读已存在的配置文件，不在界面构造时顺手写一个默认配置（离屏测试与
+    只读环境都不该因为开个面板就产生副作用）。任何读取/解析异常都退回默认。
+    """
+    units = dict(DEFAULT_PLOT_UNITS)
+    source: object = overrides
+    if source is None:
+        try:
+            path = default_config_path()
+            if os.path.exists(path):
+                cfg, _warning = load_config(path)
+                if isinstance(cfg, dict):
+                    source = cfg.get("plot_units")
+        except Exception:  # noqa: BLE001 - 配置坏了也要能画图
+            source = None
+    if isinstance(source, dict):
+        for key in units:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                units[key] = value.strip()
+    return units
 
 
 class PlotPanel(QWidget):
@@ -97,6 +136,7 @@ class PlotPanel(QWidget):
         window_seconds: object = _UNSET,  # 不传=默认 60s；传 None=全部（受上限约束）
         refresh_fps: Optional[int] = None,
         buffer: Optional[TelemetryBuffer] = None,
+        units: Optional[Dict[str, str]] = None,
     ) -> None:
         super().__init__(parent)
 
@@ -108,6 +148,8 @@ class PlotPanel(QWidget):
         else:
             self._window = window_seconds  # type: ignore[assignment]
         self._fps = int(refresh_fps or self.DEFAULT_FPS)
+        # 坐标轴单位（card17）：sp/pv/out/time 四项，来自 config.plot_units
+        self._units = _resolve_units(units)
 
         # 共享模型缓冲（可选）：接线后与主窗口/日志看到同一份有上限数据
         self._buf: Optional[TelemetryBuffer] = buffer
@@ -130,8 +172,10 @@ class PlotPanel(QWidget):
         self._paused = False
         self._y_auto = True
         self._follow = True      # 横轴模式：True=跟随最新，False=自由（用户掌控）
+        self._empty_view = False  # 当前是否处于"无数据"空态
 
         self._build_ui()
+        self._apply_empty_state()
 
         # 统一刷新定时器：新数据只置脏标记，30fps 兜底重画
         self._timer = QTimer(self)
@@ -171,10 +215,10 @@ class PlotPanel(QWidget):
         self._fit_btn = QPushButton("适应全部")
 
         self._mode_label = QLabel("")
-        self._mode_label.setStyleSheet(f"color: {_FOLLOW_COLOR}; font-size: 11px;")
+        self._mode_label.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
 
         self._cap_hint = QLabel("")
-        self._cap_hint.setStyleSheet("color: #888888; font-size: 11px;")
+        self._cap_hint.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
 
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
@@ -193,14 +237,38 @@ class PlotPanel(QWidget):
         # ---- 曲线 ----
         self._pv_plot = pg.PlotWidget(title="设定值 / 过程量")
         self._pv_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._sp_curve = self._pv_plot.plot(pen=pg.mkPen("#999999", style=Qt.DashLine), name="SP")
-        self._pv_curve = self._pv_plot.plot(pen=pg.mkPen("#2ecc71", width=2), name="PV")
-        self._pv_plot.addLegend()
+        self._pv_plot.setLabel("bottom", "时间", units=self._units["time"])
+        self._pv_plot.setLabel("left", "过程量", units=self._units["pv"])
+
+        # 图例必须先于曲线创建（card17）：addLegend() 只对之后创建的 item 自动
+        # 登记；先建曲线、再补图例，结果就是"图例对象存在、条目一个没有"，
+        # 叠加绘图库给浅色背景的默认黑底，表现成图例彻底隐形。
+        legend_bg = QColor(COLORS["panel"])
+        legend_bg.setAlpha(205)  # 半透明：图例压在曲线上时仍能看穿数据
+        self._legend = self._pv_plot.addLegend(
+            offset=(8, 8),
+            pen=pg.mkPen(COLORS["border"], width=1),
+            brush=pg.mkBrush(legend_bg),
+            labelTextColor=COLORS["text"],
+            labelTextSize="9pt",
+        )
+        self._sp_curve = self._pv_plot.plot(
+            pen=pg.mkPen("#999999", style=Qt.DashLine), name="设定值 SP"
+        )
+        self._pv_curve = self._pv_plot.plot(pen=pg.mkPen("#2ecc71", width=2), name="过程量 PV")
+
+        # 空态提示：无数据时居中显示，第一帧数据到达即隐藏，避免"有数据了提示还在"
+        self._empty_text = pg.TextItem(
+            "等待数据 · 连接设备后开始采集", color=COLORS["muted"], anchor=(0.5, 0.5)
+        )
+        self._pv_plot.addItem(self._empty_text)
+        self._empty_text.setPos(_EMPTY_X_SPAN / 2.0, 0.5)
 
         self._out_plot = pg.PlotWidget(title="输出 OUT")
         self._out_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._out_plot.setLabel("bottom", "时间", units=self._units["time"])
+        self._out_plot.setLabel("left", "输出", units=self._units["out"])
         self._out_curve = self._out_plot.plot(pen=pg.mkPen("#e67e22", width=2), name="OUT")
-        self._out_plot.setLabel("bottom", "时间", units="s")
 
         layout.addWidget(self._pv_plot, stretch=3)
         layout.addWidget(self._out_plot, stretch=1)
@@ -215,6 +283,34 @@ class PlotPanel(QWidget):
         # 用户鼠标缩放 / 拖动 / 框选 → 自动进入自由模式（程序 setXRange 不触发本信号）
         for plot in (self._pv_plot, self._out_plot):
             plot.getViewBox().sigRangeChangedManually.connect(self._on_manual_range)
+
+    def _apply_empty_state(self) -> None:
+        """无数据空态（card17）：隐藏纵轴、横轴固定跨度、居中提示。
+
+        不再让绘图库按空数据自动给出 0–1 范围（那会被误读成"已经有数据，
+        只是曲线贴在底部"）；横轴固定 0–10s，给的是一个还没开始计时的量程。
+        """
+        for plot in (self._pv_plot, self._out_plot):
+            vb = plot.getViewBox()
+            vb.enableAutoRange(x=False, y=False)
+            vb.setXRange(0.0, _EMPTY_X_SPAN, padding=0)
+            vb.setYRange(0.0, 1.0, padding=0)
+            plot.hideAxis("left")
+            plot.hideAxis("bottom")
+        self._legend.setVisible(False)
+        self._empty_text.setVisible(True)
+        self._empty_text.setPos(_EMPTY_X_SPAN / 2.0, 0.5)
+        self._empty_view = True
+
+    def _apply_data_state(self) -> None:
+        """第一帧数据到达：撤提示、还原坐标轴与图例、纵轴交回自动/手动开关。"""
+        for plot in (self._pv_plot, self._out_plot):
+            plot.showAxis("left")
+            plot.showAxis("bottom")
+            plot.getViewBox().enableAutoRange(x=False, y=self._y_auto)
+        self._empty_text.setVisible(False)
+        self._legend.setVisible(True)
+        self._empty_view = False
 
     # ------------------------------------------------------------------ API
 
@@ -407,13 +503,16 @@ class PlotPanel(QWidget):
                     vb.setXRange(xl, xr, padding=0)
 
     def _update_mode_label(self) -> None:
-        """工具条状态：区分"不重绘"与"横轴自由"，两者可同时成立。"""
+        """工具条状态：动作与状态用不同词（按钮「跟随最新」/ 状态「跟随中」「自由查看」）。
+
+        暂停与横轴自由是两件正交的事，可以同时成立，所以用「·」拼接而不是二选一。
+        """
         parts = []
         if self._paused:
             parts.append("已暂停重绘")
-        parts.append("跟随最新" if self._follow else "已暂停跟随")
+        parts.append("跟随中" if self._follow else "自由查看")
         self._mode_label.setText(" · ".join(parts))
-        color = _FOLLOW_COLOR if self._follow else _FREE_COLOR
+        color = COLORS["muted"] if self._follow else COLORS["warn"]
         self._mode_label.setStyleSheet(f"color: {color}; font-size: 11px;")
 
     def _on_timer(self) -> None:
@@ -493,7 +592,12 @@ class PlotPanel(QWidget):
             for curve in (self._sp_curve, self._pv_curve, self._out_curve):
                 curve.setData([], [])
             self._cap_hint.setText("")
+            if not self._empty_view:
+                self._apply_empty_state()
             return
+
+        if self._empty_view:
+            self._apply_data_state()
 
         full = self._extract(0)
         x_first = float(full[0, 0])

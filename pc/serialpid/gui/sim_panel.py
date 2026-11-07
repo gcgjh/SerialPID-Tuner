@@ -1,4 +1,4 @@
-"""内置模拟器对象参数面板（card25）。
+"""内置模拟器对象参数面板（card25 / 卡27）。
 
 面板只做三件事：摆参数、填预设、把改后的参数打成快照发出去。
 
@@ -7,6 +7,9 @@
 * **默认折叠**：左栏已经靠滚动条撑着，展开后也不能把日志挤没——面板只提供
   ``set_expanded(bool)``，高度由自身内容决定，日志在滚动区外不受影响。
 * **每项一句人话**：标签只写名字，解释放在行下方的次级色小字里，换主题也不丢。
+* **参数口径从核心层来**：范围/默认/预设都在 ``serialpid.sim.params`` 与
+  ``serialpid.sim.presets``，面板只负责控件与读写——持久化与扫参脚本共用同一套
+  定义，不会再出现"面板能填 40 拍、脚本只认 20 拍"。
 
 参数键（与 sim/plant.py 的对象参数一一对应）::
 
@@ -18,19 +21,17 @@
     quant     测量量化步长（过程量单位）
     period_ms 控制周期（ms），即引擎节拍
 
-预设覆盖卡25 要求的五类对象：快速小惯性、慢速大惯性热对象、大延迟、带噪声传感器、
-接近临界振荡的难调对象。切换预设会一次性填好全部参数并只发一次 ``paramsChanged``。
+改值即发快照并延迟落盘（``sim_state.json``，与 config.json 同目录），下次启动读回。
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
-    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -42,109 +43,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..sim import sim_config
+from ..sim.params import CORE_PARAMS, PARAM_ORDER, PARAM_SPECS
+from ..sim.presets import DESCRIPTIONS, PRESETS
 from .theme import COLORS
 
-#: 六个核心对象参数 + 控制周期；键顺序即界面顺序
-CORE_PARAMS: Tuple[str, ...] = ("gain", "tau1", "tau2", "delay", "noise", "quant")
-PARAM_ORDER: Tuple[str, ...] = CORE_PARAMS + ("period_ms",)
-
-#: 名称 / 单位 / 范围 / 步进 / 默认 / 一句人话解释
-_PARAM_SPECS: Dict[str, Dict[str, object]] = {
-    "gain": {
-        "label": "对象增益",
-        "unit": "×",
-        "low": 0.05,
-        "high": 50.0,
-        "step": 0.05,
-        "decimals": 2,
-        "default": 1.0,
-        "hint": "执行量每走 1% 能让过程量涨多少；调大更容易超调。",
-    },
-    "tau1": {
-        "label": "时间常数 1",
-        "unit": "s",
-        "low": 0.05,
-        "high": 120.0,
-        "step": 0.1,
-        "decimals": 2,
-        "default": 1.5,
-        "hint": "第一级惯性的快慢；越小反应越快、越难稳。",
-    },
-    "tau2": {
-        "label": "时间常数 2",
-        "unit": "s",
-        "low": 0.05,
-        "high": 300.0,
-        "step": 0.1,
-        "decimals": 2,
-        "default": 4.0,
-        "hint": "第二级惯性的快慢；两级串联才有超调。",
-    },
-    "delay": {
-        "label": "纯延迟",
-        "unit": "拍",
-        "low": 0,
-        "high": 40,
-        "step": 1,
-        "decimals": 0,
-        "default": 0,
-        "hint": "执行量晚几拍才起作用；延迟是振荡的主因。",
-    },
-    "noise": {
-        "label": "测量噪声 σ",
-        "unit": "",
-        "low": 0.0,
-        "high": 5.0,
-        "step": 0.01,
-        "decimals": 2,
-        "default": 0.0,
-        "hint": "只加在测量值上，曲线抖但对象内部不受污染。",
-    },
-    "quant": {
-        "label": "量化步长",
-        "unit": "",
-        "low": 0.0,
-        "high": 2.0,
-        "step": 0.001,
-        "decimals": 3,
-        "default": 0.0,
-        "hint": "传感器分辨率；设成 0.1 就能看到阶梯。",
-    },
-    "period_ms": {
-        "label": "控制周期",
-        "unit": "ms",
-        "low": 10,
-        "high": 200,
-        "step": 5,
-        "decimals": 0,
-        "default": 50,
-        "hint": "引擎节拍，也是“拍数”的换算基准（50 ms = 20 Hz）。",
-    },
-}
-
-#: 场景预设：名字 -> 参数覆盖（只写与默认不同的键也可以，这里写全便于复现）
-PRESETS: Dict[str, Dict[str, float]] = {
-    "快速小惯性": {
-        "gain": 1.0, "tau1": 0.3, "tau2": 0.8, "delay": 0,
-        "noise": 0.0, "quant": 0.0, "period_ms": 50,
-    },
-    "慢速大惯性热对象": {
-        "gain": 1.0, "tau1": 12.0, "tau2": 45.0, "delay": 0,
-        "noise": 0.0, "quant": 0.0, "period_ms": 50,
-    },
-    "大延迟对象": {
-        "gain": 1.0, "tau1": 2.0, "tau2": 5.0, "delay": 10,
-        "noise": 0.0, "quant": 0.0, "period_ms": 50,
-    },
-    "带噪声传感器": {
-        "gain": 1.0, "tau1": 1.2, "tau2": 3.0, "delay": 0,
-        "noise": 1.2, "quant": 0.05, "period_ms": 50,
-    },
-    "接近临界振荡": {
-        "gain": 8.0, "tau1": 0.8, "tau2": 2.5, "delay": 6,
-        "noise": 0.0, "quant": 0.0, "period_ms": 50,
-    },
-}
+#: 兼容旧引用（卡25 的测试按这两个名字取用）
+_PARAM_SPECS: Dict[str, Dict[str, object]] = PARAM_SPECS
 
 _HINT_STYLE = f"color: {COLORS['muted']}; font-size: 8pt;"
 
@@ -162,6 +67,13 @@ class SimPanel(QWidget):
         super().__init__(parent)
         self._spins: Dict[str, object] = {}
         self._emitting = False
+        #: 落盘路径（与 config.json 同目录；测试可通过 SERIALPID_CONFIG 改变）
+        self._state_path = sim_config.default_state_path()
+        self.load_warning: str = ""
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(200)
+        self._save_timer.timeout.connect(self.save_now)
 
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
@@ -193,7 +105,11 @@ class SimPanel(QWidget):
         preset_row.addWidget(QLabel("场景预设"))
         self._preset = QComboBox()
         self._preset.addItem("自定义")
-        self._preset.addItems(list(PRESETS))
+        for name in PRESETS:
+            self._preset.addItem(name)
+            # 预设名下面挂一句"对应什么真实对象"，用户先认对象再谈参数
+            index = self._preset.count() - 1
+            self._preset.setItemData(index, DESCRIPTIONS.get(name, ""), Qt.ToolTipRole)
         self._preset.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._preset.currentTextChanged.connect(self._on_preset_text)
         preset_row.addWidget(self._preset, stretch=1)
@@ -228,7 +144,40 @@ class SimPanel(QWidget):
         self._body.hide()
         root.addWidget(self._body)
 
+        self._load_saved()
         self._sync_preset_label()
+
+    # ---- 持久化 ---------------------------------------------------------- #
+
+    def _load_saved(self) -> None:
+        """启动时读回上次那套参数；读不到就用默认，沿原样不打扰用户。"""
+        try:
+            values, warning = sim_config.load_params(self._state_path)
+        except Exception as exc:  # noqa: BLE001 - 状态文件问题不该挡启动
+            self.load_warning = f"仿真参数读取失败：{exc}"
+            return
+        self.load_warning = warning or ""
+        self._emitting = True
+        try:
+            for key, value in values.items():
+                spin = self._spins.get(key)
+                if spin is None:
+                    continue
+                spin.setValue(type(spin.value())(value))
+        finally:
+            self._emitting = False
+
+    def save_now(self) -> bool:
+        """立即落盘（不弹任何提示）；返回是否写入成功。"""
+        self._save_timer.stop()
+        try:
+            sim_config.save_params(self.params(), self._state_path)
+            return True
+        except OSError:
+            return False
+
+    def _schedule_save(self) -> None:
+        self._save_timer.start()
 
     # ---- 构造辅助 ----
 
@@ -268,6 +217,7 @@ class SimPanel(QWidget):
             self._emitting = not emit
         self._sync_preset_label(values)
         if emit:
+            self._schedule_save()
             self.paramsChanged.emit(self.params())
 
     def apply_preset(self, name: str) -> bool:
@@ -305,6 +255,7 @@ class SimPanel(QWidget):
         if self._emitting:
             return
         self._sync_preset_label()
+        self._schedule_save()
         self.paramsChanged.emit(self.params())
 
     def _on_preset_text(self, name: str) -> None:

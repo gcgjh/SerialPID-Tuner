@@ -11,19 +11,22 @@
     对开环对象施加阶跃，从响应曲线辨识对象增益 K、纯滞后 L（s）、
     时间常数 T（s），再按下表反推参数。
 
-公式表（经典 Ziegler-Nichols）::
+公式表（经典 Ziegler-Nichols，全篇乘号用 ×、除号用 /，周期大写 Tu）::
 
-    闭环法            Kp            Ti          Td
-    P               0.50 Ku        —           —
-    PI              0.45 Ku        Tu/1.2      —
-    PID             0.60 Ku        Tu/2        Tu/8
+    闭环法            Kp                Ti          Td
+    P               0.50 × Ku          —           —
+    PI              0.45 × Ku          Tu / 1.2    —
+    PID             0.60 × Ku          Tu / 2      Tu / 8
 
-    开环法            Kp            Ti          Td
-    P               T/(K L)        —           —
-    PI              0.90 T/(K L)   3.33 L      —
-    PID             1.20 T/(K L)   2 L         0.5 L
+    开环法            Kp                  Ti          Td
+    P               T / (K × L)         —           —
+    PI              0.90 × T / (K × L)  3.33 × L    —
+    PID             1.20 × T / (K × L)  2 × L       0.5 × L
 
-其中 Ki = Kp / Ti，Kd = Kp * Td（Ti/Td 单位均为 s）。
+其中 Ki = Kp / Ti，Kd = Kp × Td（Ti/Td 单位均为 s）。
+
+界面 ``gui/zn_panel.py`` 的 ``CLOSED_FORMULAS`` / ``OPEN_FORMULAS`` 与上表
+逐项一致，``tests/test_zn_panel.py`` 会交叉核对；改系数时三处同步。
 """
 
 from __future__ import annotations

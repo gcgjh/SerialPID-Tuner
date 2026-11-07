@@ -33,9 +33,28 @@ CONFIG_VERSION = 1
 _DOC_LINES = [
     "SerialPID-Tuner 应用配置；修改后重启程序生效。",
     "param_limits：界面参数输入框的上下限 / 步进 / 默认值。",
+    "plot_units：曲线坐标轴单位（sp / pv 过程量、out 输出、time 时间）；空串会回退默认。",
+    "ui：窗口尺寸与左栏宽度记忆（像素整数），关闭时自动写入、启动时读回。",
+    "ui.onboarding_done：首次运行引导是否已看过（布尔），点过跳过也算看过。",
     "注意：放宽范围不会关闭下发前的数值有限性校验（NaN / inf / 超出 float32 仍会被拒绝）。",
     "示例：把 Kp 上限放宽到 500 -> \"kp\": {\"min\": 0, \"max\": 500, \"step\": 0.001, \"default\": 2.0}",
 ]
+
+#: 界面记忆项（card16）：只认这几个键，范围合法性由界面侧夹取
+UI_KEYS = ("window_width", "window_height", "left_panel_width")
+
+#: 界面里的布尔记忆项（卡30）：首次运行引导是否已看过。
+#: 与尺寸记忆同放在 ``ui`` 节点，但类型是布尔，不能复用上面的正整数校验。
+UI_BOOL_KEYS = ("onboarding_done",)
+
+#: 曲线坐标轴单位默认值（card17）：温度类对象 + 百分比输出。
+#: 面板从这里取，不在绘图代码里写死；不同对象改 config.json 即可。
+DEFAULT_PLOT_UNITS: Dict[str, str] = {
+    "sp": "℃",
+    "pv": "℃",
+    "out": "%",
+    "time": "s",
+}
 
 DEFAULT_PARAM_LIMITS: Dict[str, Dict[str, float]] = {
     "kp": {"min": 0.0, "max": 100.0, "step": 0.001, "default": 2.0},
@@ -49,6 +68,8 @@ DEFAULT_CONFIG: Dict = {
     "version": CONFIG_VERSION,
     "_说明": _DOC_LINES,
     "param_limits": DEFAULT_PARAM_LIMITS,
+    "plot_units": DEFAULT_PLOT_UNITS,
+    "ui": {},
 }
 
 
@@ -85,6 +106,56 @@ def _coerce_limits(key: str, raw: object) -> Tuple[Optional[Dict[str, float]], O
     if not (lo <= default <= hi):
         values["default"] = lo
     return values, None
+
+
+def _coerce_units(raw: object) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """校验 plot_units：只接受非空字符串，未知键忽略，缺项保留默认。"""
+    if not isinstance(raw, dict):
+        return None, "plot_units 不是对象，已用默认单位"
+    units = dict(DEFAULT_PLOT_UNITS)
+    bad = False
+    for key in DEFAULT_PLOT_UNITS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, str) and value.strip():
+            units[key] = value.strip()
+        else:
+            bad = True
+    return units, ("plot_units 有非法值，已回退默认单位" if bad else None)
+
+
+def _coerce_ui(raw: object) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+    """校验 ui 记忆项：尺寸键只认正整数，布尔键只认布尔；非法值丢弃并告警。"""
+    if not isinstance(raw, dict):
+        return None, "ui 不是对象，已忽略界面记忆"
+    ui: Dict[str, object] = {}
+    bad = False
+    for key in UI_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            bad = True
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            bad = True
+            continue
+        if number <= 0:
+            bad = True
+            continue
+        ui[key] = number
+    for key in UI_BOOL_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool):
+            ui[key] = value
+        else:
+            bad = True
+    return ui, ("ui 有非法值，已忽略该项" if bad else None)
 
 
 def load_config(path: Optional[str] = None, *, strict: bool = False) -> Tuple[Dict, Optional[str]]:
@@ -135,6 +206,22 @@ def load_config(path: Optional[str] = None, *, strict: bool = False) -> Tuple[Di
                 config["param_limits"][key] = limits
             else:
                 warnings.append(reason)
+
+    raw_units = payload.get("plot_units")
+    if raw_units is not None:
+        units, reason = _coerce_units(raw_units)
+        if units is not None:
+            config["plot_units"] = units
+        if reason:
+            warnings.append(reason)
+
+    raw_ui = payload.get("ui")
+    if raw_ui is not None:
+        ui, reason_ui = _coerce_ui(raw_ui)
+        if ui is not None:
+            config["ui"] = ui
+        if reason_ui:
+            warnings.append(reason_ui)
 
     if payload.get("schema") not in (None, SCHEMA_NAME):
         warnings.append(f"未知配置 schema {payload.get('schema')!r}，已按兼容方式读取")

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..csv_export import CsvExportError, export_telemetry
+from ..messages import UserMessage
 from ..model import TelemetryBuffer
 
 
@@ -90,7 +91,15 @@ class LogPanel(QWidget):
         try:
             rows = export_telemetry(samples, path)
         except (CsvExportError, OSError) as exc:
-            self.log(f"导出失败：{exc}")
+            # 卡30：日志里的失败也按「现象 / 原因 / 下一步」三段式
+            self.log(
+                UserMessage(
+                    "导出失败，CSV 没有写出来",
+                    f"目标路径不可写或不合法：{exc}",
+                    "换一个有写权限的目录（例如桌面）再导出；当前数据仍在缓冲里，不会丢。",
+                    detail=str(exc),
+                ).as_block()
+            )
             return 0
         self.log(f"已导出 {rows} 条记录（六位小数）-> {Path(path).name}")
         return rows
