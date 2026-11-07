@@ -1,0 +1,29 @@
+# tracemalloc 分代对比
+# 进程 39172 · 快照 2 份
+# t=+60s 已跟踪 25.89 MB（峰值 25.95 MB）
+# t=+1500s 已跟踪 31.05 MB（峰值 31.08 MB）
+
+## 首末对比：+60s → +1500s（24.0 min）
+已跟踪内存 25.89 → 31.05 MB（+5.16 MB，+12.9 MB/h）
+
+Top 20 分配点（按净增长字节）：
+ 1.   +2293.2 KiB (+94718 块) return struct.unpack(fmt, bytes(payload))
+ 2.   +2074.2 KiB (+18989 块) sample = TelemetrySample(t_ms, sp, pv, out, err)
+ 3.    +318.8 KiB (+1382 块) self.rows.append(dict(row))
+ 4.    +153.1 KiB (+297 块) self._buf.append(sample)
+ 5.    +111.2 KiB (+2025 块) traces = _get_traces()
+ 6.     +31.7 KiB (+311 块) entry = TraceEntry(
+ 7.     +27.2 KiB (+774 块) from PySide6.QtCore import QTimer  # noqa: PLC0415
+ 8.     +18.9 KiB (+691 块) return cext.proc_num_handles(self.pid)
+ 9.     +18.9 KiB (+691 块) ("buffer_points", lambda: len(win._buffer)),
+10.     +18.3 KiB (+298 块) File "C:\Users\shehu\Desktop\串口PID\SerialPID-Tuner\tools\soak_test.py", line 868
+11.     +16.3 KiB (+315 块) timer.setSingleShot(True)
+12.     +16.2 KiB (+691 块) row["fps"] = round(float(snapshot.fps), 2)
+13.     +16.2 KiB (+691 块) row["traced_mb"] = round(self._tracemalloc.get_traced_memory()[0] / CB, 2)
+14.     +16.2 KiB (+691 块) "rss_mb": round(rss_mb, 2),
+15.     +16.2 KiB (+691 块) "t_s": round(elapsed, 1),
+16.     +16.2 KiB (+690 块) return round((time.perf_counter() - started) * 1000.0, 2)
+17.     +15.2 KiB (+485 块) ("log_rows", lambda: int(win._log._view.blockCount())),
+18.     +14.9 KiB (+294 块) Frame(type=buf[3], payload=bytes(buf[4: 4 + payload_len]))
+19.     +14.9 KiB (+634 块) row["rtt_ms"] = round(float(rtt), 2) if rtt is not None else None
+20.     +13.8 KiB (+118 块) return replace(snap, **changes)  # type: ignore[arg-type]
