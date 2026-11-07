@@ -32,8 +32,14 @@ def check(name: str, cond: bool, detail: str) -> None:
 
 
 def feed(panel: PlotPanel, n: int, step_ms: int = 50, peak_at: int | None = None,
-         peak_val: float = 0.0, sp: float = 25.0) -> None:
-    t = 0
+         peak_val: float = 0.0, sp: float = 25.0, start_ms: int = 0) -> None:
+    """连续喂 n 个点。
+
+    ``start_ms`` 必须接着上一批的时间戳往下走：card11 之后，时间戳倒退
+    会被判成"MCU 复位"，清空重开时间轴（这是正确行为，不是缺陷）。
+    分批喂数据时若每次从 0 重新计时，等于每批都伪造一次复位。
+    """
+    t = start_ms
     for i in range(n):
         t += step_ms
         pv = 24.0 + (i % 7) * 0.1
@@ -85,7 +91,7 @@ p5 = PlotPanel()
 feed(p5, 200)                     # 10s
 p5._toggle_pause()                # 暂停
 check("暂停状态生效", p5.is_paused(), "")
-feed(p5, 200)                     # 暂停期间再入 200 点
+feed(p5, 200, start_ms=10000)     # 暂停期间再入 200 点（时间戳接着走，别伪造复位）
 check("暂停期间数据照常入队", p5.point_count == 400,
       f"队列 {p5.point_count} 点（暂停不清空、不丢点）")
 p5._toggle_pause()                # 恢复

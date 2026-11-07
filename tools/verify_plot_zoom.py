@@ -1,4 +1,5 @@
-"""card7 修复验收：横轴跟随/自由双模式、缩放不复位、视口淘汰保护。
+"""card7 / card17 修复验收：横轴跟随/自由双模式、缩放不复位、视口淘汰保护，
+以及图例/轴标签/空态/工具条文案（card17）。
 
 运行：python tools/verify_plot_zoom.py   （需 .venv 环境）
 """
@@ -57,11 +58,14 @@ p.render_now()
 x0, x1 = xrange(p)
 check("跟随模式基线", p.is_following() and x1 > 99.0 and (x1 - x0) < 65.0,
       f"跟随中，横轴 {x0:.1f}~{x1:.1f}s（窗口 60s、数据 0~99.95s）")
+check("工具条状态与按钮不同词", p._mode_label.text() == "跟随中"
+      and p._follow_btn.text() == "跟随最新",
+      f"状态「{p._mode_label.text()}」/ 按钮「{p._follow_btn.text()}」")
 
 # ---- 2) 用户手动缩放到 10–20s → 自动进入自由模式 ----
 zoom_manually(p, 10.0, 20.0)
 check("手动缩放进入自由模式", not p.is_following(), "is_following()=False")
-check("工具条显示已暂停跟随", "已暂停跟随" in p._mode_label.text(),
+check("工具条显示自由查看", "自由查看" in p._mode_label.text(),
       f"状态文案「{p._mode_label.text()}」")
 
 # ---- 3) 连续 100 帧渲染，横轴不回弹 ----
@@ -94,7 +98,7 @@ p.render_now()
 xa, xb = xrange(p)
 check("跟随最新恢复滚动", p.is_following() and xb > 101.0 and (xb - xa) < 65.0,
       f"跟随中，横轴 {xa:.1f}~{xb:.1f}s")
-check("跟随最新后文案复位", "已暂停跟随" not in p._mode_label.text(),
+check("跟随最新后文案复位", "自由查看" not in p._mode_label.text() and "跟随中" in p._mode_label.text(),
       f"状态文案「{p._mode_label.text()}」")
 
 # ---- 6) 时间窗切到 30s → 自动回到跟随 ----
@@ -122,7 +126,7 @@ p._pause_btn.click()                 # 暂停
 p._pause_btn.click()                 # 继续
 p._pause_btn.click()                 # 再暂停
 check("暂停+自由文案区分", "已暂停重绘" in p._mode_label.text()
-      and "已暂停跟随" in p._mode_label.text(),
+      and "自由查看" in p._mode_label.text(),
       f"状态文案「{p._mode_label.text()}」")
 cnt_before = p.point_count
 i = feed(p, 10, i)                   # 暂停期间数据照常入队
@@ -180,4 +184,4 @@ print()
 if fails:
     print("验收失败项:", fails)
     sys.exit(1)
-print("card7 全部验收项通过")
+print("card7 / card17 全部验收项通过")
