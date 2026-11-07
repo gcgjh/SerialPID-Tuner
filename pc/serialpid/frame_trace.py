@@ -29,7 +29,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from .protocol import Frame, PACKET_NAMES, describe_frame, parse_frame
 
@@ -194,12 +194,74 @@ class FrameTrace:
         return "\n".join(head + body) + "\n"
 
 
+def _direction_of(number: int, value: object) -> str:
+    """方向字段：rx/tx 及别名（up/down…）折成 rx/tx。"""
+    if isinstance(value, str):
+        key = value.strip().lower()
+        found = _DIR_ALIASES.get(key)
+        if found is not None:
+            return found
+    raise ValueError(f"第 {number} 行 dir 非法：{value!r}")
+
+
+def _parse_line(number: int, payload: Dict[str, object]) -> TraceEntry:
+    """把一行 JSON 折成帧记录；出错抛 ``ValueError``（已带行号）。
+
+    认两种文件：
+
+    * 本模块导出的（``payload`` = 载荷十六进制，``type`` 单列）；
+    * ``sim/recorder.py`` 录的（``raw`` = 整帧十六进制），自动解出类型与载荷。
+    """
+    direction = _direction_of(number, payload.get("dir"))
+    stamp = payload.get("t", payload.get("t_ms"))
+    if not isinstance(stamp, int) or isinstance(stamp, bool) or stamp < 0:
+        raise ValueError(f"第 {number} 行 t 非法：{stamp!r}")
+
+    has_payload = "payload" in payload
+    if not has_payload and "raw" not in payload:
+        raise ValueError(f"第 {number} 行既没有 payload（载荷）也没有 raw（整帧）")
+    field = "payload" if has_payload else "raw"
+    text = payload.get(field)
+    if not isinstance(text, str):
+        raise ValueError(f"第 {number} 行 {field} 不是字符串")
+    try:
+        data = bytes.fromhex(text)
+    except ValueError as exc:
+        raise ValueError(f"第 {number} 行 {field} 不是合法十六进制：{exc}") from None
+
+    if has_payload:
+        pkt_type = payload.get("type")
+        if (
+            not isinstance(pkt_type, int)
+            or isinstance(pkt_type, bool)
+            or not 0 <= pkt_type <= 0xFF
+        ):
+            raise ValueError(f"第 {number} 行 type 非法：{pkt_type!r}")
+        body = data
+    else:
+        # 整帧字节：类型 / 载荷从帧头解出来，文件里的 type 字段只作参考
+        try:
+            frame = parse_frame(data)
+        except ValueError as exc:
+            raise ValueError(f"第 {number} 行 raw 不是可解析的帧：{exc}") from None
+        pkt_type = frame.type
+        body = frame.payload
+
+    declared = payload.get("len")
+    if isinstance(declared, int) and not isinstance(declared, bool) and declared != len(data):
+        raise ValueError(
+            f"第 {number} 行 len={declared} 与载荷实际 {len(data)} 字节不符"
+        )
+    return TraceEntry(stamp, direction, pkt_type, body)
+
+
 def load_jsonl(text: str) -> List[TraceEntry]:
     """把 :meth:`FrameTrace.to_jsonl` 的产物读回成帧流。
 
     容错口径：空行跳过；字段缺失 / 类型非法 / 载荷十六进制不合法一律抛
-    ``ValueError`` 并带行号——回放用的是真实现场数据，静默跳过会把"丢了
-    一段"伪装成"当时就这样"。
+    ``ValueError`` 并带行号——这里的调用方要的是"这份文件到底能不能完整回放"，
+    静默跳过会把"丢了一段"伪装成"当时就这样"。界面读外部文件用
+    :func:`load_jsonl_lenient`（跳过坏行但把条数报给用户）。
     """
     entries: List[TraceEntry] = []
     for number, line in enumerate(text.splitlines(), start=1):
@@ -210,31 +272,36 @@ def load_jsonl(text: str) -> List[TraceEntry]:
             payload = json.loads(stripped)
         except ValueError as exc:
             raise ValueError(f"第 {number} 行不是合法 JSON：{exc}") from None
-        if not isinstance(payload, dict):
-            raise ValueError(f"第 {number} 行不是对象")
-        direction = payload.get("dir")
-        if direction not in _DIRECTIONS:
-            raise ValueError(f"第 {number} 行 dir 非法：{direction!r}")
-        pkt_type = payload.get("type")
-        if not isinstance(pkt_type, int) or isinstance(pkt_type, bool) or not 0 <= pkt_type <= 0xFF:
-            raise ValueError(f"第 {number} 行 type 非法：{pkt_type!r}")
-        stamp = payload.get("t")
-        if not isinstance(stamp, int) or isinstance(stamp, bool) or stamp < 0:
-            raise ValueError(f"第 {number} 行 t 非法：{stamp!r}")
-        raw = payload.get("payload", "")
-        if not isinstance(raw, str):
-            raise ValueError(f"第 {number} 行 payload 不是字符串")
-        try:
-            body = bytes.fromhex(raw)
-        except ValueError as exc:
-            raise ValueError(f"第 {number} 行 payload 不是合法十六进制：{exc}") from None
-        declared = payload.get("len")
-        if isinstance(declared, int) and declared != len(body):
-            raise ValueError(
-                f"第 {number} 行 len={declared} 与载荷实际 {len(body)} 字节不符"
-            )
-        entries.append(TraceEntry(stamp, direction, pkt_type, body))
+        entries.append(_parse_line(number, payload))
     return entries
+
+
+def load_jsonl_lenient(
+    text: str, max_reports: int = 5
+) -> Tuple[List[TraceEntry], int, List[str]]:
+    """容错读回：坏行跳过并计数。
+
+    返回 ``(帧列表, 跳过行数, 前几条原因)``。原因里带行号，界面据此提示
+    "跳过 3 行（第 2、7、9 行…）"——跳过可以，但不能悄悄跳过。
+    """
+    entries: List[TraceEntry] = []
+    skipped = 0
+    notes: List[str] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+            entries.append(_parse_line(number, payload))
+        except ValueError as exc:
+            skipped += 1
+            message = str(exc)
+            if not message.startswith(f"第 {number} 行"):
+                message = f"第 {number} 行不是合法 JSON：{message}"
+            if len(notes) < max_reports:
+                notes.append(message)
+    return entries, skipped, notes
 
 
 class ReplayCursor:

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""card28 帧级日志与回放回归：环形缓冲、JSONL 往返、坏行报错、倍速与单步。
+"""card28 / card33 帧级日志与回放回归：环形缓冲、JSONL 往返、坏行策略、
+两套格式兼容、倍速与单步。
 
-覆盖验收：「帧日志可导出、可回放」。
+覆盖验收：「帧日志可导出、可回放」「畸形文件坏行跳过并计数」。
 运行：cd pc && python -m pytest tests/test_frame_trace.py -q
 """
 
@@ -21,6 +22,7 @@ from serialpid.frame_trace import (  # noqa: E402
     ReplayCursor,
     TraceEntry,
     load_jsonl,
+    load_jsonl_lenient,
     rx_only,
     summarize,
 )
@@ -96,13 +98,75 @@ def test_jsonl_round_trip_preserves_frames() -> None:
 
 
 def test_export_has_no_port_or_path_fields() -> None:
-    """导出会给别人看：只留帧本身与相对时刻。"""
+    """导出会给别人看：只留帧本身与相对时刻，不留端口 / 路径 / 序列号。"""
     trace = _trace()
     trace.append(DIR_RX, PacketType.TELEMETRY, pack_telemetry(0, 1, 1, 1, 0), t_ms=0)
     text = trace.to_jsonl()
     assert "COM" not in text
     for line in text.splitlines():
-        assert set(_json_keys(line)) == {"t", "dir", "type", "name", "len", "payload"}
+        assert set(_json_keys(line)) == {
+            "t", "dir", "dir_label", "type", "name", "len", "payload"
+        }
+
+
+def test_jsonl_has_direction_label_and_bounds_length() -> None:
+    """方向既给机器码也给中文标签；长度字段与实际载荷一致。"""
+    import json
+
+    trace = _trace()
+    payload = pack_telemetry(7, 28, 27.5, 10, 0.5)
+    trace.append(DIR_RX, PacketType.TELEMETRY, payload, t_ms=10)
+    trace.append(DIR_TX, PacketType.PING, b"", t_ms=20)
+    rows = [json.loads(line) for line in trace.to_jsonl().splitlines()]
+    assert rows[0]["dir"] == "rx" and rows[0]["dir_label"] == "接收"
+    assert rows[1]["dir"] == "tx" and rows[1]["dir_label"] == "发送"
+    assert rows[0]["len"] == len(payload) == len(bytes.fromhex(rows[0]["payload"]))
+    assert rows[0]["name"] == "TELEMETRY"
+
+
+def test_lenient_loader_skips_bad_lines_and_counts() -> None:
+    good = '{"t":0,"dir":"rx","type":1,"len":0,"payload":""}'
+    text = "\n".join([good, "{oops", good, '{"t":1,"dir":"x","type":1,"payload":""}', good])
+    entries, skipped, notes = load_jsonl_lenient(text)
+    assert len(entries) == 3
+    assert skipped == 2
+    assert "第 2 行" in notes[0]
+    # 严格版对同一份文件仍然报错，两条路径各司其职
+    with pytest.raises(ValueError):
+        load_jsonl(text)
+
+
+def test_lenient_loader_reads_recorder_format() -> None:
+    """``sim/recorder.py`` 录的整帧格式也能读：raw 里解出类型与载荷。"""
+    from serialpid.protocol import encode
+
+    raw = encode(PacketType.TELEMETRY, pack_telemetry(5, 28, 27, 10, 0))
+    line = (
+        '{"t_ms":40,"dir":"down","type":1,"len":%d,"raw":"%s"}'
+        % (len(raw), raw.hex())
+    )
+    entries, skipped, _notes = load_jsonl_lenient(line)
+    assert skipped == 0
+    assert entries[0].direction == "rx"
+    assert entries[0].pkt_type == PacketType.TELEMETRY
+    assert unpack_telemetry(entries[0].payload)[1] == pytest.approx(28.0)
+
+
+def test_direction_aliases_fold_to_rx_tx() -> None:
+    for line, expect in (
+        ('{"t":0,"dir":"up","type":2,"payload":""}', "tx"),
+        ('{"t":0,"dir":"down","type":2,"payload":""}', "rx"),
+    ):
+        assert load_jsonl(line)[0].direction == expect
+
+
+def test_memory_estimate_is_bounded() -> None:
+    trace = FrameTrace(capacity=50, clock=_Clock())
+    for index in range(50):
+        trace.append(DIR_RX, PacketType.PONG, b"", t_ms=index)
+    size = trace.memory_estimate_bytes()
+    assert size > 50 * 100
+    assert size < 200 * 1024  # 50 条空载荷帧不该超过 200 KB
 
 
 def _json_keys(line: str) -> list[str]:

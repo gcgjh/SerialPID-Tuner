@@ -8,4 +8,4 @@
 ``pc/tests/test_version_consistency.py`` 会检查其余各处是否跟着对齐。
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

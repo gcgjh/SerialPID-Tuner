@@ -66,6 +66,10 @@ FALLBACK_HELP = """# SerialPID-Tuner 帮助
 """
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_INLINE_LINK_RE = re.compile(r"\[([^\]\n]*)\]\(([^)\n]*)\)")
+#: 这些 scheme 不该变成可点链接：帮助窗口是只读说明书，不是执行入口
+_BAD_LINK_SCHEMES = ("javascript", "vbscript", "data", "file")
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +162,34 @@ def load_help_markdown() -> str:
     return built if built else FALLBACK_HELP
 
 
+def normalize_markdown(markdown: str) -> str:
+    """渲染前的兜底整形，只处理"会毁掉整屏"的两种畸形（卡35）。
+
+    * **未闭合代码块**：Qt 会把其后所有内容吞进一个代码块（后半篇变成等宽
+      灰底），补一行收尾即可保住可读性；
+    * **可疑链接**：``javascript:`` / ``data:`` / ``file:`` 之类的目标不该在
+      只读的帮助窗口里变成可点入口，降级成纯文字；空目标同样降级。
+
+    除此之外一个字都不改：帮助必须与手册同源，兜底不能顺手"润色"。
+    """
+    text = str(markdown or "")
+    fences = 0
+    for line in text.splitlines():
+        if _FENCE_RE.match(line):
+            fences += 1
+    if fences % 2:  # 奇数 = 有一个没关，补在末尾
+        text = text.rstrip("\n") + "\n```\n"
+
+    def _replace(match: "re.Match[str]") -> str:
+        label, target = match.group(1), match.group(2).strip()
+        scheme = target.split(":", 1)[0].strip().lower() if ":" in target else ""
+        if not target or scheme in _BAD_LINK_SCHEMES:
+            return label
+        return match.group(0)
+
+    return _INLINE_LINK_RE.sub(_replace, text)
+
+
 def help_source_label() -> str:
     """帮助内容来源（显示在对话框底部，便于确认是不是最新手册）。"""
     try:
@@ -221,7 +253,9 @@ class HelpDialog(QDialog):
             QUrl.fromLocalFile(str(docs_dir()) + os.sep)
         )
         self._browser.document().setDefaultStyleSheet(_STYLE)
-        self._browser.setMarkdown(self._markdown)
+        # 渲染用整形后的副本：手册被手改坏（漏了 ```、贴了 javascript: 链接）
+        # 也不该让 F1 弹一屏半个代码块（卡35）
+        self._browser.setMarkdown(normalize_markdown(self._markdown))
         self._browser.setStyleSheet(
             f"QTextBrowser {{ background: {COLORS['bg']}; color: {COLORS['text']};"
             f" border: 1px solid {COLORS['border']}; }}"
@@ -251,6 +285,10 @@ class HelpDialog(QDialog):
     def markdown(self) -> str:
         return self._markdown
 
+    def rendered_markdown(self) -> str:
+        """实际喂给渲染器的文本（= 原文 + 畸形兜底），便于测试核对只补不改。"""
+        return normalize_markdown(self._markdown)
+
     def browser(self) -> QTextBrowser:
         return self._browser
 
@@ -270,4 +308,5 @@ __all__ = [
     "guide_path",
     "help_source_label",
     "load_help_markdown",
+    "normalize_markdown",
 ]

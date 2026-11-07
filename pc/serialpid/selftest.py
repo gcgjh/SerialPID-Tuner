@@ -220,6 +220,24 @@ def _serial_backend_name() -> str:
     return "serial.serialposix"
 
 
+def serial_backend_summary() -> str:
+    """一行串口后端状态（关于框 / 诊断文本用，与自检同一判定口径）。
+
+    不在两处各写一套判定：自检说"后端可用"、关于框说"不可用"是最难查的那种
+    自相矛盾。
+    """
+    name = _serial_backend_name()
+    try:
+        importlib.import_module(name)
+    except Exception as exc:  # noqa: BLE001 - 依赖缺失 / 平台不支持都同样处理
+        return f"{name} 不可用（{type(exc).__name__}: {exc}）"
+    try:
+        importlib.import_module("serial.tools.list_ports")
+    except Exception as exc:  # noqa: BLE001
+        return f"{name} 已加载；端口枚举模块异常（{type(exc).__name__}: {exc}）"
+    return f"{name} 已加载，端口枚举可用"
+
+
 def _check_serial_backend() -> Tuple[str, str, str]:
     name = _serial_backend_name()
     try:

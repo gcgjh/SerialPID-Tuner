@@ -90,3 +90,75 @@ def test_wiring_diagram_renders(tmp_path, monkeypatch):
     image = QImage(str(path))
     assert not image.isNull()
     assert image.width() == wiring.W and image.height() == wiring.H
+
+
+# ---------------------------------------------------------------- 卡35：幂等与中文
+
+
+def _pixel_diff_ratio(first: Path, second: Path) -> float:
+    """两张图的像素差异比例（0 = 逐像素一致）。
+
+    截图里带时钟与链路统计，跨秒重跑不可能逐像素相同；用比例判定"是否只是
+    动态文字在变"，比"完全一致"更贴近事实，也能抓住"整屏错位 / 字体变了"。
+    """
+    import numpy as np
+
+    a, b = QImage(str(first)), QImage(str(second))
+    assert a.size() == b.size(), "重跑后尺寸变了"
+    rows, stride = a.height(), a.bytesPerLine()
+    buf_a = np.frombuffer(a.constBits(), dtype=np.uint8, count=rows * stride)
+    buf_b = np.frombuffer(b.constBits(), dtype=np.uint8, count=rows * stride)
+    return float((buf_a != buf_b).mean())
+
+
+def test_capture_all_is_idempotent_on_rerun(monkeypatch, tmp_path):
+    """同参数重跑：同名覆盖、不多出文件、画面不漂移（卡35 验收项）。"""
+    import serialpid.selftest as st
+
+    monkeypatch.setattr(
+        st, "run_selftest", lambda **_kwargs: st.SelfTestReport(checks=[])
+    )
+    out = tmp_path / "images"
+    first_paths = shots.capture_all(out, size=(1360, 900))
+    second_paths = shots.capture_all(out, size=(1360, 900))
+    assert [p.name for p in second_paths] == [p.name for p in first_paths]
+    # 只覆盖同名文件：目录里不多出 png（没有 -1/-2 副本，也没有旧尺寸残留）
+    pngs = sorted(p.name for p in out.glob("*.png"))
+    assert pngs == sorted(name for name, _d in shots.SHOTS.values())
+    for path in second_paths:
+        assert path.stat().st_size > 5_000
+
+    # 复刻一次"重跑前后"的对比：把终态再存一份，两两比像素。
+    # 实测漂移只有 0.00%~0.02%（日志时钟的秒数在变），阈值取 0.2%：
+    # 再宽就抓不住"字体回退成方块 / 整屏错位"这类真问题。
+    shadow = tmp_path / "shadow"
+    restored = shots.capture_all(shadow, size=(1360, 900))
+    for before, after in zip(second_paths, restored):
+        ratio = _pixel_diff_ratio(before, after)
+        assert ratio < 0.002, f"{before.name} 重跑漂移 {ratio:.3%}（只该有日志时钟在变）"
+
+
+def test_cjk_glyphs_render_as_real_glyphs_not_tofu():
+    """离屏平台不加载系统字体会把中文画成方块：两个不同汉字必须画出不同墨迹。
+
+    只看"文件非空"抓不到这种问题——方块截图照样有几千字节。
+    """
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter
+
+    app = shots.make_app()
+    families = shots.load_cjk_fonts()
+    assert families, "没有加载到任何中文字体，截图会全是方块（豆腐块）"
+
+    def render(char: str) -> bytes:
+        image = QImage(64, 64, QImage.Format.Format_ARGB32)
+        image.fill(QColor("#000000"))
+        painter = QPainter(image)
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(QFont(app.font().family(), 32))
+        painter.drawText(image.rect(), 0x0084, char)  # AlignCenter
+        painter.end()
+        return bytes(image.constBits())
+
+    first, second = render("连"), render("口")
+    assert any(first), "汉字没有画出任何墨迹"
+    assert first != second, "两个字画出来一模一样 —— 说明用的是同一个方块占位字形"

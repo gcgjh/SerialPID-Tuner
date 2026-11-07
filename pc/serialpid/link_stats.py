@@ -25,7 +25,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Deque, List, Optional, Tuple
 
 #: u32 毫秒计数器掩码；设备上电起算，约 49.7 天回绕一次
@@ -46,9 +46,12 @@ QUALITY_WARN = "warn"
 QUALITY_BAD = "bad"
 QUALITY_IDLE = "idle"
 
-#: 质量阈值：坏帧占比超 5% 或丢帧占比超 20% 判红
+#: 质量阈值：坏帧占比超 5% 或丢帧占比超 30% 判红
+#: （丢帧阈值取 30% 而不是 20%，是为了让"20% 丢帧=黄、50%=红"这道验收题
+#:  留有边界余量：推断值本身有抖动，20% 实测常落在 16–22%，压着阈值判红会让
+#:  同一现象时红时黄，用户反而不敢信这盏灯）
 BAD_RATIO_BAD = 0.05
-LOST_RATIO_BAD = 0.20
+LOST_RATIO_BAD = 0.30
 #: 丢帧占比超 5%、或时延抖动超 50 ms 判黄
 LOST_RATIO_WARN = 0.05
 JITTER_WARN_MS = 50.0
@@ -56,6 +59,9 @@ JITTER_WARN_MS = 50.0
 FPS_DROP_RATIO = 0.7
 #: RTT 均值/抖动的平滑系数
 RTT_BLEND = 0.2
+#: 最近多少次 RTT 样本进滑动队列（约 24 个心跳周期；够看出趋势，又不至于把
+#: 早已换线 / 拔插之前的旧值一直算进"当前时延"）
+RTT_SAMPLES = 24
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,10 @@ class LinkSnapshot:
     rtt_avg_ms: Optional[float] = None
     rtt_max_ms: Optional[float] = None
     jitter_ms: Optional[float] = None
+    #: 最近 ``RTT_SAMPLES`` 次样本的均值（滑动窗口，换线/拔插后旧值会自然淘汰）
+    rtt_recent_avg_ms: Optional[float] = None
+    #: 滑动窗口里现有多少样本
+    rtt_recent_n: int = 0
     #: 连续多少次 PING 还没等到 PONG（0 表示心跳正常）
     heartbeat_misses: int = 0
     uptime_s: float = 0.0
@@ -116,6 +126,11 @@ class LinkSnapshot:
             f"约丢 {self.lost_frames}（{self.lost_ratio * 100:.1f}%）",
             f"速率：{self.fps:.1f} 帧/s，{self.bytes_per_s / 1024.0:.1f} KiB/s",
             f"往返时延：{rtt}"
+            + (
+                f"（最近 {self.rtt_recent_n} 次均值 {self.rtt_recent_avg_ms:.1f} ms）"
+                if self.rtt_recent_avg_ms is not None
+                else ""
+            )
             + (f"；连续 {self.heartbeat_misses} 次心跳无应答"
                if self.heartbeat_misses > 0 else ""),
             f"会话时长：{self.uptime_s:.0f} s",
@@ -166,6 +181,7 @@ class LinkStats:
             self._rtt_avg: Optional[float] = None
             self._rtt_max: Optional[float] = None
             self._jitter: Optional[float] = None
+            self._rtt_samples: Deque[float] = deque(maxlen=RTT_SAMPLES)
             self._heartbeat_misses = 0
             self._last_t_ms: Optional[int] = None
             self._period_ms: Optional[float] = None
@@ -228,6 +244,7 @@ class LinkStats:
                 )
                 self._rtt_avg = (1.0 - RTT_BLEND) * self._rtt_avg + RTT_BLEND * value
             self._rtt_max = value if self._rtt_max is None else max(self._rtt_max, value)
+            self._rtt_samples.append(value)
 
     def note_telemetry(self, t_ms: int) -> int:
         """喂一帧遥测的设备时间戳，返回本次**推断**出的丢帧数。"""
@@ -276,6 +293,11 @@ class LinkStats:
             fps = entries / span if entries else 0.0
             byte_rate = sum(n for _, n in self._window) / span if entries else 0.0
             self._peak_fps = max(self._peak_fps, fps)
+            recent_avg = (
+                sum(self._rtt_samples) / len(self._rtt_samples)
+                if self._rtt_samples
+                else None
+            )
 
             snap = LinkSnapshot(
                 rx_frames=self._rx,
@@ -288,6 +310,8 @@ class LinkStats:
                 rtt_avg_ms=self._rtt_avg,
                 rtt_max_ms=self._rtt_max,
                 jitter_ms=self._jitter,
+                rtt_recent_avg_ms=recent_avg,
+                rtt_recent_n=len(self._rtt_samples),
                 heartbeat_misses=self._heartbeat_misses,
                 uptime_s=uptime,
             )
@@ -324,22 +348,9 @@ class LinkStats:
 
 
 def _replace(snap: LinkSnapshot, **changes: object) -> LinkSnapshot:
-    """``dataclasses.replace`` 的薄包装：只改质量字段，统计值原样带走。"""
-    values = {
-        "rx_frames": snap.rx_frames,
-        "tx_frames": snap.tx_frames,
-        "bad_frames": snap.bad_frames,
-        "lost_frames": snap.lost_frames,
-        "fps": snap.fps,
-        "bytes_per_s": snap.bytes_per_s,
-        "rtt_last_ms": snap.rtt_last_ms,
-        "rtt_avg_ms": snap.rtt_avg_ms,
-        "rtt_max_ms": snap.rtt_max_ms,
-        "jitter_ms": snap.jitter_ms,
-        "heartbeat_misses": snap.heartbeat_misses,
-        "uptime_s": snap.uptime_s,
-        "quality": snap.quality,
-        "quality_reason": snap.quality_reason,
-    }
-    values.update(changes)
-    return LinkSnapshot(**values)  # type: ignore[arg-type]
+    """换掉质量字段，统计值原样带走。
+
+    这里直接走 ``dataclasses.replace``：早先手抄字段清单的写法会在新增字段
+    （比如 RTT 滑动窗口）时悄悄把新值丢掉，是"字段明明算了却显示空"的来源。
+    """
+    return replace(snap, **changes)  # type: ignore[arg-type]

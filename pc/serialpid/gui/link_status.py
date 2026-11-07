@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from ..link_stats import (
@@ -46,6 +47,13 @@ class LinkStatusWidget(QWidget):
         self._dot.setStyleSheet(f"color: {COLORS['muted']};")
         self._text = QLabel("未连接")
         self._text.setStyleSheet(f"color: {COLORS['muted']};")
+        # 等宽数字（card32）：RTT 从 12 ms 跳到 8 ms 时字宽会变，状态栏整行跟着
+        # 左右抖；等宽字体让每个数字占同样宽度，读数时不分散注意力。
+        # 只改字体请求，不写死具体字体族——没装 Consolas 的机器会回落到后备等宽字体。
+        mono = QFont()
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setFamilies(["Consolas", "DejaVu Sans Mono", "Courier New", "monospace"])
+        self._text.setFont(mono)
 
         box = QHBoxLayout(self)
         box.setContentsMargins(6, 0, 6, 0)
@@ -54,6 +62,7 @@ class LinkStatusWidget(QWidget):
         box.addWidget(self._text)
 
         self._snapshot = LinkSnapshot()
+        self._fault: str | None = None
         self.setToolTip(self._snapshot.details())
 
     # ---- 对外 -------------------------------------------------------------
@@ -61,6 +70,7 @@ class LinkStatusWidget(QWidget):
     def update_snapshot(self, snapshot: LinkSnapshot) -> None:
         """把最新快照画出来；同一帧内多次调用不会抖。"""
         self._snapshot = snapshot
+        self._fault = None
         color = _QUALITY_COLORS.get(snapshot.quality, COLORS["muted"])
         self._dot.setStyleSheet(f"color: {color};")
         if snapshot.quality == QUALITY_IDLE:
@@ -74,6 +84,24 @@ class LinkStatusWidget(QWidget):
         )
         self.setToolTip(snapshot.details())
 
+    def show_fault(self, reason_text: str, details: str = "") -> None:
+        """链路因故障断开：红灯 + 一行原因，别把"没有数据可测"画成绿色。
+
+        断开后统计就没有新样本了，继续显示旧的帧率/丢帧数会让人以为链路还在跑，
+        所以这里只报原因；完整统计（最后一次会话的）放在悬停提示里。
+        """
+        self._fault = reason_text or "链路断开"
+        self._dot.setStyleSheet(f"color: {COLORS['err']};")
+        self._text.setStyleSheet(f"color: {COLORS['err']};")
+        self._text.setText(f"链路断：{self._fault}")
+        tip = f"链路已断开：{self._fault}"
+        if details:
+            tip += "\n\n最后一次会话的统计：\n" + details
+        self.setToolTip(tip)
+
+    def is_fault(self) -> bool:
+        return self._fault is not None
+
     def snapshot(self) -> LinkSnapshot:
         return self._snapshot
 
@@ -82,4 +110,6 @@ class LinkStatusWidget(QWidget):
         return self._text.text()
 
     def quality(self) -> str:
+        if self._fault is not None:
+            return QUALITY_BAD
         return self._snapshot.quality

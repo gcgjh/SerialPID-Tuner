@@ -139,6 +139,89 @@ def test_help_browser_scales_wide_screenshot():
     assert image.height() > 0
 
 
+# ---------------------------------------------------------------- 畸形 markdown（卡35）
+
+
+def test_normalize_markdown_closes_unclosed_code_fence():
+    broken = "# 帮助\n\n## 五分钟上手\n\n1. 打不开端口\n2. 看日志\n\n```text\n现象：……\n"
+    fixed = hd.normalize_markdown(broken)
+    fences = [line for line in fixed.splitlines() if line.strip().startswith("```")]
+    assert len(fences) % 2 == 0, "未闭合代码块没有补上收尾"
+    # 只补收尾，正文一个字都不动
+    assert fixed == broken.rstrip("\n") + "\n```\n"
+
+
+def test_normalize_markdown_drops_dangerous_links_but_keeps_label():
+    broken = "点[这里](javascript:alert(1))或[空目标]()，保留[手册](https://example.com/a)。"
+    fixed = hd.normalize_markdown(broken)
+    assert "javascript:" not in fixed
+    assert "[空目标](" not in fixed
+    assert "这里" in fixed and "空目标" in fixed
+    # 正常链接原样保留（帮助窗口本身不打开外部链接，链接文字也得留着）
+    assert "[手册](https://example.com/a)" in fixed
+
+
+def test_help_dialog_survives_malformed_markdown():
+    """坏链接 + 未闭合代码块：不抛异常，且后半篇照常可读。"""
+    _app()  # 离屏下必须先有 QApplication 再建控件
+    broken = "\n".join(
+        [
+            "# 帮助",
+            "",
+            "## 五分钟上手",
+            "",
+            "先看[诊断](javascript:void(0))。",
+            "",
+            "```text",
+            "现象：端口打不开",
+            "",
+            "## 常见问题",
+            "",
+            "曲线不动就检查波特率。",
+        ]
+    )
+    dialog = hd.HelpDialog(markdown=broken)
+    try:
+        text = dialog.browser().toPlainText()
+        assert "端口打不开" in text
+        assert "曲线不动就检查波特率" in text, "未闭合代码块吞掉了后半篇"
+        # 渲染文本与用户看到的 markdown 只差兜底修复，不是另写一份
+        assert dialog.rendered_markdown().startswith("# 帮助")
+    finally:
+        dialog.close()
+
+
+def test_help_dialog_reopen_has_clean_scroll_and_selection():
+    """关掉重开：不带着上次的滚动位置和选中态（卡35 验收项）。"""
+    _app()
+    markdown = "# 帮助\n\n## 五分钟上手\n\n" + "\n".join(
+        f"{index}. 第 {index} 步" for index in range(1, 40)
+    )
+    first = hd.HelpDialog(markdown=markdown)
+    try:
+        first.resize(900, 300)   # 限高：内容够长才有可滚的余量
+        first.show()
+        _app().processEvents()
+        bar = first.browser().verticalScrollBar()
+        assert bar.maximum() > 0, "内容不够长，滚动位置测不出区别"
+        bar.setValue(bar.maximum())
+        first.browser().selectAll()   # textCursor() 返回副本，选中态必须从控件侧建立
+        assert bar.value() > 0
+        assert first.browser().textCursor().hasSelection()
+    finally:
+        first.close()
+
+    second = hd.HelpDialog(markdown=markdown)
+    try:
+        second.resize(900, 300)
+        second.show()
+        _app().processEvents()
+        assert second.browser().verticalScrollBar().value() == 0
+        assert not second.browser().textCursor().hasSelection()
+    finally:
+        second.close()
+
+
 def test_main_window_has_help_menu_and_f1_shortcut(monkeypatch, tmp_path):
     import serialpid.selftest as st
     import serialpid.gui.main_window as mw
@@ -155,6 +238,50 @@ def test_main_window_has_help_menu_and_f1_shortcut(monkeypatch, tmp_path):
         assert win._help_shortcut.key().toString() == "F1"
         assert win.build_help_dialog().windowTitle() == "使用帮助"
         assert win.build_about_dialog().windowTitle() == "关于 SerialPID-Tuner"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_f1_key_really_opens_the_help_dialog(monkeypatch, tmp_path):
+    """只断言快捷键绑的是 F1 还不够：真按 F1 必须真的弹出帮助（卡35）。"""
+    import serialpid.selftest as st
+    import serialpid.gui.main_window as mw
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    monkeypatch.setattr(
+        st, "run_selftest", lambda **_kwargs: st.SelfTestReport(checks=[])
+    )
+    monkeypatch.setenv("SERIALPID_CONFIG", str(tmp_path / "config.json"))
+
+    opened: list[str] = []
+
+    class _Recorder:
+        """替身：exec() 会阻塞事件循环，这里只登记"被弹出来了"。"""
+
+        def __init__(self, title: str) -> None:
+            self._title = title
+
+        def windowTitle(self) -> str:
+            return self._title
+
+        def exec(self) -> int:
+            opened.append(self._title)
+            return 0
+
+    app = _app()
+    win = mw.MainWindow()
+    try:
+        monkeypatch.setattr(
+            win, "build_help_dialog", lambda: _Recorder("使用帮助")
+        )
+        win.show()
+        win.activateWindow()
+        app.processEvents()
+        QTest.keyClick(win, Qt.Key.Key_F1)
+        app.processEvents()
+        assert opened == ["使用帮助"], "按 F1 没有打开帮助对话框"
     finally:
         win.close()
         app.processEvents()

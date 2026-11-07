@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import load_config, default_config_path
+from ..messages import preset_error_message
 from ..preset_manager import (
     NAME_MAX_LEN,
     NOTE_MAX_LEN,
@@ -335,6 +336,12 @@ class ParamPanel(QWidget):
         else:
             self._preset_status.setStyleSheet("color: #888;")
 
+    def _set_preset_error(self, action: str, error: str) -> None:
+        """预设操作失败：状态行给一行三段式，完整版放tooltip（卡35）。"""
+        message = preset_error_message(action, error)
+        self._set_status(message.as_line(), error=True)
+        self._preset_status.setToolTip(message.as_block())
+
     # ---- 保存 ----
 
     def _save_preset(self) -> None:
@@ -345,7 +352,7 @@ class ParamPanel(QWidget):
         try:
             self.store_preset(name, note)
         except PresetError as exc:
-            self._set_status(f"保存失败：{exc}", error=True)
+            self._set_preset_error("保存", str(exc))
 
     def _ask_preset_save(self, default_name: str) -> Optional[Tuple[str, str]]:
         """弹命名对话框；测试可替换此方法跳过 GUI 交互。"""
@@ -420,7 +427,7 @@ class ParamPanel(QWidget):
         try:
             preset = self._presets.get(name)
         except PresetError as exc:
-            self._set_status(f"加载失败：{exc}", error=True)
+            self._set_preset_error("加载", str(exc))
             return
 
         clamped = self.apply_preset(preset)
@@ -467,7 +474,7 @@ class ParamPanel(QWidget):
         try:
             self._presets.delete(name)
         except PresetError as exc:
-            self._set_status(f"删除失败：{exc}", error=True)
+            self._set_preset_error("删除", str(exc))
             return False
         if self._loaded_name and self._loaded_name.strip().casefold() == name.strip().casefold():
             self._loaded_name = None
@@ -481,7 +488,7 @@ class ParamPanel(QWidget):
         try:
             preset = self._presets.rename(old_name, new_name)
         except PresetError as exc:
-            self._set_status(f"重命名失败：{exc}", error=True)
+            self._set_preset_error("重命名", str(exc))
             return False
         if self._loaded_name and self._loaded_name.strip().casefold() == old_name.strip().casefold():
             self._loaded_name = preset.name

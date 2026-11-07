@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -111,20 +111,35 @@ class OnboardingDialog(QDialog):
         text = QLabel(body)
         text.setWordWrap(True)
         text.setTextFormat(Qt.TextFormat.RichText)
+        # 顶部对齐：默认是垂直居中，配图区一撑高，正文就漂到半空中（卡35 走查）
+        text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         text.setStyleSheet(f"color: {COLORS['text']}; font-size: 10.5pt;")
         layout.addWidget(heading)
-        layout.addWidget(text, 1)
+        layout.addWidget(text)
+        layout.addSpacing(8)
 
-        path = Path(docs_dir()) / image
+        # 截图在 docs/images/ 下：只拼 docs_dir() 会找不到图，向导就变成
+        # 一大片空白 + 文字（卡35 走查时抓到的）
+        path = Path(docs_dir()) / "images" / image
+        if not path.is_file():
+            path = Path(docs_dir()) / image   # 兼容把图放在 docs/ 根下的旧布局
         if path.is_file():
             pix = QPixmap(str(path))
             if not pix.isNull():
+                # 宽高都要限：05-step-metrics.png 是竖长条，只限宽会把三屏里
+                # 的图文挤出窗口（卡35 走查时第 3 屏正文被压到顶上）
                 shot = QLabel()
                 shot.setPixmap(
-                    pix.scaledToWidth(560, Qt.TransformationMode.SmoothTransformation)
+                    pix.scaled(
+                        QSize(560, 260),
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
                 )
                 shot.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+                shot.setToolTip(f"示意截图：docs/images/{image}")
                 layout.addWidget(shot)
+        layout.addStretch(1)   # 余量留底部，正文与配图贴着顶部排（不上下分离）
         return page
 
     # ---- 导航 ----

@@ -17,12 +17,15 @@ from serialpid.messages import (  # noqa: E402
     empty_port_message,
     explain_serial_error,
     frame_name,
+    heartbeat_timeout_message,
     join_names,
     optional_detail,
     parse_error_message,
     port_scan_failed_message,
+    preset_error_message,
     selftest_message,
     serial_open_message,
+    worker_error_message,
 )
 
 
@@ -111,3 +114,54 @@ def test_join_names_and_optional_detail():
     assert join_names([]) == ""
     assert optional_detail(UserMessage("a", "b", "c", detail="raw")) == "raw"
     assert optional_detail(None) == ""
+
+
+# ---------------------------------------------------------------- 卡35 新增
+
+
+def test_heartbeat_timeout_message_counts_misses_and_points_at_setting():
+    """心跳判死必须带次数；次数未知时如实退化，绝不编一个数字。"""
+    message = heartbeat_timeout_message(3, 3)
+    assert "连续 3 次" in message.phenomenon
+    assert "容忍上限 3 次" in message.phenomenon
+    assert "链路设置" in message.next_step
+    assert "PONG" in message.cause
+
+    only_missed = heartbeat_timeout_message(5, 0)
+    assert "连续 5 次" in only_missed.phenomenon
+    assert "容忍上限" not in only_missed.phenomenon
+
+    unknown = heartbeat_timeout_message()
+    assert "多次" in unknown.phenomenon
+    assert "0" not in unknown.phenomenon        # 不编次数
+    assert unknown.as_block().count("\n") == 2  # 仍是三行
+
+
+def test_worker_error_message_classifies_and_keeps_raw_text():
+    read = worker_error_message("读取异常: ClearCommError failed (拒绝访问)")
+    assert "读" in read.phenomenon
+    assert "读取异常" in read.cause
+    assert read.detail == "读取异常: ClearCommError failed (拒绝访问)"
+
+    write = worker_error_message("写入异常: 设备未就绪")
+    assert "下发" in write.phenomenon or "没生效" in write.phenomenon
+
+    heartbeat = worker_error_message("心跳发送失败: 端口已关闭")
+    assert "心跳" in heartbeat.phenomenon
+
+    unknown = worker_error_message("")
+    assert unknown.cause            # 空原文也要给一句可读的原因
+    assert "错误" in unknown.phenomenon
+
+
+def test_preset_error_message_covers_four_actions_and_is_single_line():
+    for action in ("保存", "加载", "删除", "重命名"):
+        message = preset_error_message(action, "Errno 13 权限不足")
+        line = message.as_line()
+        assert "\n" not in line
+        assert "权限不足" in line           # 原因原样转述
+        assert line.startswith("现象：")
+        assert "下一步：" in line
+    assert preset_error_message("删除", "x").phenomenon == "预设没有删掉"
+    # 未知动作也能给出一句人话，而不是 KeyError
+    assert preset_error_message("未知动作", "boom").phenomenon

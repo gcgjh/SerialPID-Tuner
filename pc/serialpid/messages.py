@@ -190,6 +190,115 @@ def selftest_message(
 
 
 # ---------------------------------------------------------------------------
+# 心跳超时（card28 新增判死原因）
+# ---------------------------------------------------------------------------
+
+
+def heartbeat_timeout_message(missed: int = 0, limit: int = 0) -> UserMessage:
+    """心跳判死：必须说清"连了几次没应答"和"可以放宽"，否则用户只会怀疑程序坏了。
+
+    ``missed`` / ``limit`` 未知时（0）退化成不带数字的说法，绝不编一个次数。
+    """
+    missed = max(int(missed or 0), 0)
+    limit = max(int(limit or 0), 0)
+    if missed and limit:
+        phenomenon = f"对端连续 {missed} 次（容忍上限 {limit} 次）未应答心跳，已断开"
+        next_step = (
+            "检查设备供电与接线；固件只是忙、心跳回得慢时，"
+            "可在「工具 → 链路设置…」里把「容忍次数」调大后重连。"
+        )
+    elif missed:
+        phenomenon = f"对端连续 {missed} 次未应答心跳，已断开"
+        next_step = (
+            "检查设备供电与接线；固件心跳回得慢时，"
+            "可在「工具 → 链路设置…」里把「容忍次数」调大后重连。"
+        )
+    else:
+        phenomenon = "对端连续多次未应答心跳，已断开"
+        next_step = (
+            "检查设备供电与接线；固件心跳回得慢时，"
+            "可在「工具 → 链路设置…」里把「容忍次数」调大后重连。"
+        )
+    return UserMessage(
+        phenomenon=phenomenon,
+        cause="心跳请求发出去了但没收到应答，且这段时间也没有遥测：设备死机、被复位，或固件没实现 PONG",
+        next_step=next_step,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 后台线程回报的原始错误 / 预设文件操作失败
+# ---------------------------------------------------------------------------
+
+
+def worker_error_message(text: str) -> UserMessage:
+    """接收线程回报的错误原文 -> 三段式；原文留在 ``detail`` 里给诊断用。
+
+    线程只知道自己撞上了什么（``读取异常: ...`` / ``心跳发送失败: ...``），
+    不知道用户该干什么。翻译成"这一层坏了会怎样 + 下一步"，比贴一句
+    ``错误: ...`` 有用。
+    """
+    raw = str(text or "").strip()
+    lowered = raw.lower()
+    if "心跳" in raw or "ping" in lowered:
+        return UserMessage(
+            phenomenon="心跳帧没发出去，链路质量判断会失真",
+            cause=raw or "写心跳时抛出异常",
+            next_step="观察是否连续出现；反复出现就断开重连，并点「诊断端口」复制诊断文本反馈。",
+            detail=raw,
+        )
+    if "写" in raw or "write" in lowered:
+        return UserMessage(
+            phenomenon="数据没有写进串口，这次下发/指令可能没生效",
+            cause=raw or "写串口时抛出异常",
+            next_step="先看设备是否仍在线；断开重连后重新下发一次，仍失败就换 USB 口或线复测。",
+            detail=raw,
+        )
+    if "帧" in raw and "回调" in raw:
+        return UserMessage(
+            phenomenon="某一帧的数据没能交给界面，曲线上可能缺一个点",
+            cause=raw or "帧处理回调抛出异常",
+            next_step="偶发一次可忽略（下一帧会补上）；连续出现请导出帧日志反馈给开发者。",
+            detail=raw,
+        )
+    if "读" in raw or "read" in lowered:
+        return UserMessage(
+            phenomenon="读取串口数据时出错，这一小段遥测可能缺失",
+            cause=raw or "读串口时抛出异常",
+            next_step="偶发一次可继续观察；连续出现请断开重连，或点「诊断端口」复制诊断文本。",
+            detail=raw,
+        )
+    return UserMessage(
+        phenomenon="后台线程报告了一个错误，链路可能已受影响",
+        cause=raw or "线程回报错误但没有给出说明",
+        next_step="偶发一次可继续观察；重复出现请点「诊断端口」复制诊断文本，或断开后重连。",
+        detail=raw,
+    )
+
+
+#: 预设文件操作 -> (现象, 下一步)；原因由调用方带入具体异常文本
+_PRESET_ACTIONS = {
+    "保存": ("预设没有存下来", "换一个名字，或确认预设目录可写后重试。"),
+    "加载": ("预设没有加载进来", "确认这个预设还在列表里；列表被别的窗口改过就点「刷新」。"),
+    "删除": ("预设没有删掉", "确认预设文件没被别的程序占用，再重试一次。"),
+    "重命名": ("预设没有改成新名字", "确认新名字不与已有预设重名，再重试一次。"),
+}
+
+
+def preset_error_message(action: str, error: str) -> UserMessage:
+    """参数预设的增删改查失败：一句话形态够用（面板底部状态行只有一行）。"""
+    phenomenon, next_step = _PRESET_ACTIONS.get(
+        action, ("预设操作没有完成", "重试一次；仍失败请点「复制诊断」反馈给开发者。")
+    )
+    return UserMessage(
+        phenomenon=phenomenon,
+        cause=error or "预设文件读写失败（原因未知）",
+        next_step=next_step,
+        detail=error or "",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 通用
 # ---------------------------------------------------------------------------
 
@@ -215,10 +324,13 @@ __all__ = [
     "empty_port_message",
     "explain_serial_error",
     "frame_name",
+    "heartbeat_timeout_message",
     "join_names",
     "optional_detail",
     "parse_error_message",
     "port_scan_failed_message",
+    "preset_error_message",
     "selftest_message",
     "serial_open_message",
+    "worker_error_message",
 ]

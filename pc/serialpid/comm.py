@@ -100,6 +100,35 @@ DISCONNECT_TEXT: Dict[str, Tuple[str, str]] = {
     ),
 }
 
+#: 心跳参数合法范围（界面输入框与通信核心各守一道：核心不信任外部输入）
+HEARTBEAT_INTERVAL_MIN_S = 0.2
+HEARTBEAT_INTERVAL_MAX_S = 60.0
+HEARTBEAT_MAX_MISSED_MIN = 1
+HEARTBEAT_MAX_MISSED_MAX = 10
+#: 关掉心跳时的空闲判死窗口（协议 §4.1 的 1.0 s，即 card28 之前的旧行为）
+IDLE_TIMEOUT_NO_HEARTBEAT_S = 1.0
+#: 心跳判死窗口在「间隔 × 次数」之外再留的余量，保证心跳先给出可解释的原因
+HEARTBEAT_IDLE_MARGIN_S = 1.0
+
+
+def clamp_heartbeat(interval_s: float, max_missed: int) -> Tuple[float, int]:
+    """把心跳参数夹到合法范围；``interval_s <= 0`` 表示关闭（保留 0 而不是夹成 0.2）。"""
+    try:
+        interval = float(interval_s)
+    except (TypeError, ValueError):
+        interval = 0.0
+    if interval != interval or interval < 0.0:  # NaN / 负数
+        interval = 0.0
+    if interval > 0.0:
+        interval = min(max(interval, HEARTBEAT_INTERVAL_MIN_S), HEARTBEAT_INTERVAL_MAX_S)
+    try:
+        missed = int(max_missed)
+    except (TypeError, ValueError):
+        missed = HEARTBEAT_MAX_MISSED_MIN
+    missed = min(max(missed, HEARTBEAT_MAX_MISSED_MIN), HEARTBEAT_MAX_MISSED_MAX)
+    return interval, missed
+
+
 #: 串口读写异常的关键字归类（pyserial 会把所有失败统一加
 #: ``could not open port 'COMx':`` 前缀，所以只认 errno / 系统提示 / 类名）。
 _REMOVED_WORDS = (
@@ -142,8 +171,22 @@ DISCONNECT_BRIEF: Dict[str, str] = {
 }
 
 
-def describe_disconnect(reason: str) -> Tuple[str, str]:
-    """断线原因 -> (现象, 下一步)；未知原因给出"未归类"的诚实说法。"""
+#: 断线原因 -> 机制解释。给日志的「原因：」段用：现象说"怎么了"，这里说
+#: "为什么"，下一步说"该做什么"。用户贴日志时这三行就够定位。
+DISCONNECT_CAUSE: Dict[str, str] = {
+    DROP_TIMEOUT: "判死窗口内一帧数据都没收到：设备没在发、波特率不对，或线接触不良",
+    DROP_HEARTBEAT: "心跳请求发出去了但没收到应答，且这段时间也没有遥测：设备死机、被复位，或固件没实现 PONG",
+    DROP_PEER_CLOSED: "对端（模拟器 / fake_mcu）把套接字关了",
+    DROP_DEVICE_REMOVED: "系统报告端口消失：USB 被拔出，或驱动句柄被关闭",
+    DROP_DRIVER_ERROR: "串口驱动 / 系统接口返回了错误，读写通道已不可用",
+    DROP_WRITE_ERROR: "写串口时抛异常：端口被别的程序抢占，或设备已掉线",
+    DROP_READ_ERROR: "读串口时抛异常：端口被别的程序关闭，或设备掉线",
+    DROP_CLOSED: "用户点了「断开」",
+}
+
+
+def _disconnect_pair(reason: str) -> Tuple[str, str]:
+    """(现象, 下一步)：已知原因查表，未知原因给"未归类"的诚实说法。"""
     known = DISCONNECT_TEXT.get(reason)
     if known is not None:
         return known
@@ -151,6 +194,42 @@ def describe_disconnect(reason: str) -> Tuple[str, str]:
         f"链路断开（原因未归类：{reason or '未知'}）",
         "把这一行日志连同端口诊断文本一起贴给开发者",
     )
+
+
+def describe_disconnect_message(
+    reason: str, *, missed: Optional[int] = None, limit: Optional[int] = None
+) -> "UserMessage":
+    """断线原因的完整三段式说法（现象 / 原因 / 下一步）。
+
+    ``missed`` / ``limit`` 只对心跳判死有意义；未知原因不编原因，只说"未归类"。
+    """
+    from .messages import UserMessage
+
+    if reason == DROP_HEARTBEAT and (missed or limit):
+        from .messages import heartbeat_timeout_message
+
+        return heartbeat_timeout_message(int(missed or 0), int(limit or 0))
+    phenomenon, next_step = _disconnect_pair(reason)
+    cause = DISCONNECT_CAUSE.get(
+        reason, f"原因未归类：{reason or '未知'}（把这条原因连同日志贴给开发者）"
+    )
+    return UserMessage(phenomenon=phenomenon, cause=cause, next_step=next_step)
+
+
+def describe_disconnect(
+    reason: str, *, missed: Optional[int] = None, limit: Optional[int] = None
+) -> Tuple[str, str]:
+    """断线原因 -> (现象, 下一步)；未知原因给出"未归类"的诚实说法。
+
+    ``missed`` / ``limit`` 只对心跳判死有意义：说清"连了几次没应答"和"容忍上限
+    可以放宽"。需要带"原因"的完整版本用 :func:`describe_disconnect_message`。
+    """
+    if reason == DROP_HEARTBEAT and (missed or limit):
+        from .messages import heartbeat_timeout_message
+
+        message = heartbeat_timeout_message(int(missed or 0), int(limit or 0))
+        return message.phenomenon, message.next_step
+    return _disconnect_pair(reason)
 
 
 def brief_disconnect(reason: str) -> str:
@@ -181,9 +260,15 @@ class CommCore:
         self._on_frame = on_frame or (lambda t, p: None)
         self._on_connect = on_connect or (lambda ok, detail: None)
         self._on_error = on_error or (lambda msg: None)
+        # 心跳参数可在运行期改（界面开关），所以不能只在构造时算一次：
+        # 一把小锁保护这三个值，接收线程每轮取一次快照，改完下一轮即生效。
+        self._settings_lock = threading.Lock()
+        self._heartbeat_interval, self._heartbeat_max_missed = clamp_heartbeat(
+            heartbeat_interval, heartbeat_max_missed
+        )
+        # 初始空闲窗口尊重显式传入（既有测试用 0.0 关闭空闲判定），
+        # 之后一旦调用 set_heartbeat 就按心跳参数重算。
         self._idle_timeout = float(idle_timeout)
-        self._heartbeat_interval = max(float(heartbeat_interval), 0.0)
-        self._heartbeat_max_missed = max(int(heartbeat_max_missed), 1)
 
         #: 链路统计与帧日志由外部按需注入，便于界面与测试共用同一份
         self.stats = stats if stats is not None else LinkStats()
@@ -276,7 +361,60 @@ class CommCore:
 
     @property
     def heartbeat_interval(self) -> float:
-        return self._heartbeat_interval
+        with self._settings_lock:
+            return self._heartbeat_interval
+
+    @property
+    def heartbeat_max_missed(self) -> int:
+        with self._settings_lock:
+            return self._heartbeat_max_missed
+
+    @property
+    def idle_timeout(self) -> float:
+        with self._settings_lock:
+            return self._idle_timeout
+
+    def set_heartbeat(
+        self,
+        interval_s: float,
+        max_missed: Optional[int] = None,
+        *,
+        idle_timeout: Optional[float] = None,
+    ) -> Tuple[float, int]:
+        """运行期改心跳参数：下一轮接收循环即生效，**不需要断开重连**。
+
+        判决口径随参数一起收敛：
+        * ``interval_s > 0``：判死窗口 = ``间隔 × 次数 + 1 s``（心跳先给出原因）；
+        * ``interval_s == 0``：回到旧版的空闲超时 1.0 s——"不开心跳"必须与旧版
+          行为完全一致，不能留着上次心跳算出来的 7 s 窗口；
+        * ``max_missed=None`` 表示只改间隔，沿用当前次数。
+        """
+        current_missed = self._heartbeat_max_missed if max_missed is None else max_missed
+        interval, missed = clamp_heartbeat(interval_s, current_missed)
+        with self._settings_lock:
+            self._heartbeat_interval = interval
+            self._heartbeat_max_missed = missed
+            if idle_timeout is None:
+                self._idle_timeout = (
+                    interval * missed + HEARTBEAT_IDLE_MARGIN_S
+                    if interval > 0.0
+                    else IDLE_TIMEOUT_NO_HEARTBEAT_S
+                )
+            else:
+                self._idle_timeout = float(idle_timeout)
+        return interval, missed
+
+    def reset_stats(self) -> None:
+        """清空链路统计（帧计数 / 坏帧 / 丢帧 / RTT / 会话时长）。
+
+        不动帧日志、不动连接状态：用户要的是"从现在起重新数"，不是断线。
+        """
+        self.stats.reset()
+
+    def _settings(self) -> Tuple[float, int, float]:
+        """接收线程用的参数快照（一次拿全，避免三个字段各自漂移）。"""
+        with self._settings_lock:
+            return self._heartbeat_interval, self._heartbeat_max_missed, self._idle_timeout
 
     def stats_snapshot(self):
         """链路质量快照（界面线程调用；未连接时质量字段为"未连接"）。"""
@@ -297,15 +435,15 @@ class CommCore:
         empty_streak = 0
         # 空读硬上限：按超时窗口折算，与空闲超时互为兜底判据；
         # idle_timeout <= 0 表示关闭空闲超时，此判据一并停用。
+        interval, missed_limit, idle_timeout = self._settings()
+        heartbeat_on = interval > 0.0
+        # 空读硬上限：按超时窗口折算，与空闲超时互为兜底判据；
+        # idle_timeout <= 0 表示关闭空闲超时，此判据一并停用。
         max_empty = (
-            max(1, int(self._idle_timeout / _EMPTY_SLEEP) + 2)
-            if self._idle_timeout > 0
+            max(1, int(idle_timeout / _EMPTY_SLEEP) + 2)
+            if idle_timeout > 0
             else None
         )
-
-        heartbeat_on = self._heartbeat_interval > 0.0
-        interval = self._heartbeat_interval
-        missed_limit = self._heartbeat_max_missed
         #: 已发出但还没等到 PONG 的 PING 时刻（FIFO；PING 无序号，只能按先后配）
         pending_pings: Deque[float] = deque()
         missed = 0
@@ -318,6 +456,24 @@ class CommCore:
         try:
             while not self._stop.is_set():
                 now = time.monotonic()
+
+                # ---- 参数可能在运行期被界面改过：每轮取一次快照 ----
+                live_interval, live_missed, live_idle = self._settings()
+                if (live_interval, live_missed) != (interval, missed_limit):
+                    interval, missed_limit = live_interval, live_missed
+                    heartbeat_on = interval > 0.0
+                    hb_window = interval * missed_limit
+                    # 换参数等于换心跳节奏：在途 PING 的账作废，欠账清零重数
+                    pending_pings.clear()
+                    missed = 0
+                    next_ping_at = now + interval if heartbeat_on else 0.0
+                if live_idle != idle_timeout:
+                    idle_timeout = live_idle
+                    max_empty = (
+                        max(1, int(idle_timeout / _EMPTY_SLEEP) + 2)
+                        if idle_timeout > 0
+                        else None
+                    )
 
                 # ---- 心跳：按绝对时刻发，不靠"睡满间隔"（会累积漂移） ----
                 if heartbeat_on and now >= next_ping_at:
@@ -370,8 +526,8 @@ class CommCore:
                         missed = 0
                 else:
                     empty_streak += 1
-                    if self._idle_timeout > 0:
-                        idle = time.monotonic() - last_rx > self._idle_timeout
+                    if idle_timeout > 0:
+                        idle = time.monotonic() - last_rx > idle_timeout
                         if idle or (max_empty is not None and empty_streak >= max_empty):
                             self._drop(DROP_TIMEOUT)
                             return

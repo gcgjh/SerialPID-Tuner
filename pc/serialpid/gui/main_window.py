@@ -10,11 +10,14 @@
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -34,7 +37,7 @@ from ..comm import (
     DROP_CLOSED,
     RECONNECT_MAX_ATTEMPTS,
     brief_disconnect,
-    describe_disconnect,
+    describe_disconnect_message,
     reconnect_delay,
 )
 from ..comm_qt import CommWorker
@@ -50,6 +53,7 @@ from ..messages import (
     selftest_message,
     serial_open_message,
     UserMessage,
+    worker_error_message,
 )
 from ..model import TelemetryBuffer, TelemetrySample
 from ..port_scan import PortScanResult, diagnose, scan_ports
@@ -65,6 +69,8 @@ from ..protocol import (
     unpack_step_event,
 )
 from .frame_log_dialog import FrameLogDialog
+from .fault_panel import FaultPanel
+from .link_settings import LinkSettingsDialog
 from .link_status import LinkStatusWidget
 from .log_panel import LogPanel
 from .param_panel import ParamPanel
@@ -89,8 +95,10 @@ MAX_WINDOW_HEIGHT = 2160
 LOG_MIN_LINES = 8
 
 # ---- 通信默认参数（card28；可在 config.json 的 comm 段覆盖） ----
-#: 心跳间隔：一秒一次。0 表示关闭心跳（退回纯空闲断流判定）
-DEFAULT_HEARTBEAT_INTERVAL_S = 1.0
+#: 心跳间隔：**默认关闭**（card32 定的口径）。低质量链路开了心跳可能频繁
+#: 断开重连、干扰演示，所以现场要先确认"不开心跳也能连"，再按需打开。
+#: 0 表示关闭心跳，退回纯空闲断流判定（与旧版行为完全一致）。
+DEFAULT_HEARTBEAT_INTERVAL_S = 0.0
 #: 连续多少次 PING 没等到 PONG 才判链路失效（且同窗口内没有任何遥测）
 DEFAULT_HEARTBEAT_MAX_MISSED = 3
 #: 心跳判死窗口之外再留 1 秒，作为"彻底静默"的兜底
@@ -101,6 +109,14 @@ DEFAULT_TRACE_CAPACITY = 2000
 LINK_STATUS_REFRESH_MS = 1000
 #: 关掉心跳时的空闲判死窗口（与协议文档 §4.1 的 1.0 s 一致）
 IDLE_TIMEOUT_NO_HEARTBEAT_S = 1.0
+#: 仿真链路劣化默认值（card32 / card33；只作用于「内置模拟器」通道）
+#: 三个开关默认全零是硬要求：正常演示路径必须零开销、直通。
+DEFAULT_SIM_DEGRADATION = {
+    "enabled": False,
+    "drop_down": 0.0,
+    "bad_crc_down": 0.0,
+    "disconnect_after_s": 0.0,
+}
 
 #: 通道选项。前两个是真实通道，第三项是进程内仿真（card25）
 CHANNEL_TCP = "TCP"
@@ -130,7 +146,8 @@ def comm_settings(config: object = None) -> dict:
     * ``heartbeat_max_missed``：连续多少次没 PONG 才判死；
     * ``idle_timeout_s``：可选，彻底静默的兜底窗口；不给就按
       ``间隔 × 次数 + 1 s`` 推算，保证"心跳先给出可解释的原因"；
-    * ``trace_capacity``：帧日志环形缓冲容量。
+    * ``trace_capacity``：帧日志环形缓冲容量；
+    * ``sim_degradation``：内置模拟器的链路劣化（card32：丢帧 / 坏帧比例）。
 
     心跳关闭时兜底窗口回落到协议文档 §4.1 的 1.0 s，行为与旧版一致。
     """
@@ -148,6 +165,7 @@ def comm_settings(config: object = None) -> dict:
     missed = DEFAULT_HEARTBEAT_MAX_MISSED
     capacity = DEFAULT_TRACE_CAPACITY
     idle_raw = None
+    degradation = dict(DEFAULT_SIM_DEGRADATION)
 
     section = config.get("comm") if isinstance(config, dict) else None
     if isinstance(section, dict):
@@ -156,6 +174,16 @@ def comm_settings(config: object = None) -> dict:
         capacity = int(_number(section.get("trace_capacity"), capacity, 100.0, 20000.0))
         if "idle_timeout_s" in section:
             idle_raw = section.get("idle_timeout_s")
+        raw_deg = section.get("sim_degradation")
+        if isinstance(raw_deg, dict):
+            degradation = {
+                "enabled": bool(raw_deg.get("enabled", False)),
+                "drop_down": _number(raw_deg.get("drop_down"), 0.0, 0.0, 1.0),
+                "bad_crc_down": _number(raw_deg.get("bad_crc_down"), 0.0, 0.0, 1.0),
+                "disconnect_after_s": _number(
+                    raw_deg.get("disconnect_after_s"), 0.0, 0.0, 600.0
+                ),
+            }
 
     if idle_raw is not None:
         idle = _number(idle_raw, IDLE_TIMEOUT_NO_HEARTBEAT_S, 0.2, 600.0)
@@ -169,6 +197,7 @@ def comm_settings(config: object = None) -> dict:
         "heartbeat_max_missed": max(missed, 1),
         "idle_timeout_s": idle,
         "trace_capacity": max(capacity, 100),
+        "sim_degradation": degradation,
     }
 
 
@@ -323,7 +352,9 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - 配置坏了也要能打开界面
             _cfg = {}
         self._comm_settings = comm_settings(_cfg if isinstance(_cfg, dict) else {})
-        # 心跳与判死窗口由配置决定（card28）：默认 1 s × 3 次，可关可放宽
+        # 心跳默认关闭（card32）：现场先确认"不开也能连"，再按需打开。
+        # 参数可在「工具 → 链路设置…」里改，改完立即作用在当前连接上。
+        self._comm_degradation = dict(self._comm_settings["sim_degradation"])
         self._worker = CommWorker(
             heartbeat_interval=float(self._comm_settings["heartbeat_interval_s"]),
             heartbeat_max_missed=int(self._comm_settings["heartbeat_max_missed"]),
@@ -333,6 +364,10 @@ class MainWindow(QMainWindow):
         self._buffer = TelemetryBuffer()
 
         self._parse_errors = 0
+        #: 解码层坏帧（CRC / 帧尾）上次提示时的累计值与时刻——坏帧会以每秒好几条
+        #: 的速度来，提示必须限流，不然整块日志只剩这一件事（card33）。
+        self._wire_bad_logged = 0
+        self._wire_bad_log_at = 0.0
         self._parse_stat = QLabel("")
         self._parse_stat.setStyleSheet("color: #e74c3c;")
         self._parse_stat.hide()  # 为 0 时不占状态栏；大于 0 才出现（card16）
@@ -354,17 +389,35 @@ class MainWindow(QMainWindow):
         self._step = StepPanel(self._worker)
         self._zn = ZnPanel()
         self._sim = SimPanel()
+        # 故障注入（card33）：三个滑杆默认全零 = 直通；初值跟配置走，避免
+        # "界面写着 0%、链路却在丢帧"这种自相矛盾。
+        self._fault = FaultPanel()
+        self._fault.set_params(
+            drop_pct=float(self._comm_degradation.get("drop_down", 0.0)) * 100.0,
+            bad_pct=float(self._comm_degradation.get("bad_crc_down", 0.0)) * 100.0,
+            cut_s=float(self._comm_degradation.get("disconnect_after_s", 0.0)),
+            emit=False,
+        )
         self._log = LogPanel(self._buffer)
 
         # 端口扫描结果（三态：ok / empty / error）与仿真引擎句柄（card25）
         self._port_scan: PortScanResult | None = None
         self._sim_engine = None
+        #: 仿真通道的劣化包装层（card32；关闭劣化时保持 None，走零开销直通）
+        self._sim_degraded = None
         self._last_open_error = ""
+        #: 最近一次线程错误的规范化说法（三段式），供"复制诊断"取原文用
+        self._last_worker_error: UserMessage | None = None
+        #: 最近一次断线的三段式说法（状态栏短标签之外的完整解释）
+        self._last_disconnect_message: UserMessage | None = None
         self._check_banner = _CheckBanner()
 
         # ---- 链路质量与自动重连（card28） ----
         # 状态栏常驻指示：1 Hz 拉一次快照，够看清趋势又不会跟 20 Hz 遥测抢主线程
         self._link_status = LinkStatusWidget()
+        #: 故障断开的原因（card32）：有值时 1 Hz 刷新不再把红灯的"链路断"
+        #: 覆盖成灰的"未连接"，直到重新连上（或用户主动断开）才清掉。
+        self._link_fault: str | None = None
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(LINK_STATUS_REFRESH_MS)
         # 自动重连状态：默认关闭；开启后按退避重试并显示"第几次"
@@ -405,14 +458,24 @@ class MainWindow(QMainWindow):
         help_menu.addAction(help_action)
         help_menu.addAction(about_action)
 
-        # 「工具」菜单：帧级日志与回放（card28）。单独放在菜单里，
-        # 因为它是"事后排查"用的，不该常驻顶部工具栏跟连接操作抢位置。
+        # 「工具」菜单：链路设置与帧级日志回放（card28 / card32）。单独放在菜单里，
+        # 因为它们是"连接前配置"与"事后排查"用的，不该常驻顶部工具栏跟连接操作抢位置。
         tools_menu = self.menuBar().addMenu("工具")
+        link_settings_action = QAction("链路设置…（心跳 / 统计）", self)
+        link_settings_action.triggered.connect(self._show_link_settings)
+        tools_menu.addAction(link_settings_action)
+        self._link_settings_action = link_settings_action
         frame_log_action = QAction("帧日志 / 回放…", self)
         frame_log_action.triggered.connect(self._show_frame_log)
         tools_menu.addAction(frame_log_action)
         # 持有引用：菜单里的 QAction 也怕被回收（与 F1 快捷键同理）
         self._frame_log_action = frame_log_action
+        # card33：单独一条「回放帧记录」——远程协助时对方只发来一个 JSONL，
+        # 不该逼他先去学"帧日志对话框"在哪。
+        replay_action = QAction("回放帧记录…", self)
+        replay_action.triggered.connect(self._replay_from_file)
+        tools_menu.addAction(replay_action)
+        self._replay_action = replay_action
 
         shortcut = QShortcut(
             QKeySequence(QKeySequence.StandardKey.HelpContents), self
@@ -524,6 +587,8 @@ class MainWindow(QMainWindow):
         # 仿真对象参数在左侧参数区下方、默认折叠（card25）：展开与否由用户决定，
         # 折叠时只占一行标题，不会把左栏再撑高。
         left_layout.addWidget(self._sim)
+        # 故障注入紧贴仿真面板：它只在仿真通道上有意义，放在一起用户才连得上
+        left_layout.addWidget(self._fault)
         left_layout.addStretch(0)  # 控件高度够时不要被强行拉长
 
         self._log.setMinimumHeight(self._log_min_height())
@@ -646,6 +711,9 @@ class MainWindow(QMainWindow):
         self._sim.paramsChanged.connect(self._on_sim_params)
         self._sim.presetChanged.connect(self._on_sim_preset)
         self._sim.expandedChanged.connect(self._on_sim_expanded)
+        # 故障注入（card33）：滑杆一动就折算成 LinkConfig 并作用到当前仿真链路
+        self._fault.configChanged.connect(self._on_fault_config)
+        self._fault.expandedChanged.connect(self._on_sim_expanded)
 
         self._log.clear_buffer_signal().clicked.connect(self._clear_records)
         # “清空日志”只重置聚合状态，不动状态栏累计计数（那是本机开机以来的量）
@@ -659,7 +727,10 @@ class MainWindow(QMainWindow):
 
     def _on_worker_error(self, msg: str) -> None:
         self._last_open_error = msg
-        self._log.log(f"错误: {msg}")
+        # 卡35：线程只报原始异常（"读取异常: ..."），界面负责翻成三段式，
+        # 原文留在诊断里；这样日志里不会出现"错误: xxx"这种只有结论没有下文的行。
+        self._log.log(worker_error_message(msg).as_block())
+        self._last_worker_error = worker_error_message(msg)
 
     # ---- 连接管理 ----
 
@@ -875,18 +946,49 @@ class MainWindow(QMainWindow):
             self._user_disconnected = False
             self._last_pong_status = None
             self._pong_logged = False
+            # 新会话：解码层坏帧提示重新开始计数（上一场的数字不该继续吓人）
+            self._wire_bad_logged = 0
+            self._wire_bad_log_at = 0.0
+            # 连上了就不再是"链路断"：清掉故障标记，让徽章回到实时质量
+            self._link_fault = None
             self._refresh_link_status()
         else:
             self._connect_btn.setText("连接")
             brief = brief_disconnect(detail)
             self._state_label.setText(f"未连接（{brief}）")
             self._state_label.setStyleSheet(f"color: {COLORS['err']};")
-            # 六类断线原因中文化（card28）：一行现象、一行下一步，
-            # 用户不用去翻协议文档或凭"timeout"猜发生了什么。
-            phenomenon, next_step = describe_disconnect(detail)
-            self._log.log(f"连接状态：{brief}｜现象：{phenomenon}")
-            self._log.log(f"下一步：{next_step}")
-            self._refresh_link_status()
+            # 六类断线原因中文化（card28）：现象 + 原因 + 下一步三行一起进日志，
+            # 用户不用去翻协议文档或凭 "timeout" 猜发生了什么。
+            # 心跳判死再补上"连了几次没应答 / 容忍上限几次"（卡35）。
+            message = describe_disconnect_message(
+                detail,
+                missed=self._heartbeat_misses(),
+                limit=int(self._comm_settings["heartbeat_max_missed"]),
+            )
+            self._log.log(f"连接状态：{brief}")
+            self._log.log(message.as_block())
+            self._last_disconnect_message = message
+            # 断开的这一刻最该做的是把证据留住：帧日志还在内存里，能导就导（card33）
+            try:
+                frames = len(self._worker.trace)
+            except Exception:  # noqa: BLE001 - 取不到帧数不该挡住断线提示
+                frames = 0
+            self._log.log(
+                "帧日志可从「工具 → 帧日志 / 回放」导出（JSONL 能直接发给别人），"
+                "或「工具 → 回放帧记录」重演"
+                + (f"；当前缓冲 {frames} 帧还没保存" if frames else "")
+            )
+            # card32：故障断开保持红灯 + 原因；用户主动断开则回到"未连接"
+            if detail == DROP_CLOSED:
+                self._link_fault = None
+                self._refresh_link_status()
+            else:
+                self._link_fault = brief
+                try:
+                    fault_details = self._worker.stats_snapshot().details()
+                except Exception:  # noqa: BLE001 - 统计取不到也要把原因显示出来
+                    fault_details = ""
+                self._link_status.show_fault(brief, fault_details)
             # 打开失败（端口被占 / 拔了）已经由 _toggle_connection 说明过，
             # 那时不能自动重连——否则会对着一个不存在的端口无限重试。
             if not self._open_in_progress:
@@ -896,12 +998,168 @@ class MainWindow(QMainWindow):
 
     def _refresh_link_status(self) -> None:
         """1 Hz 把链路快照刷到状态栏（不随 20 Hz 遥测再开一路信号）。"""
+        if self._link_fault and not self._worker.connected:
+            # 故障断开：红灯 + 原因保持住，统计只是"最后一次会话"的参考值
+            try:
+                details = self._worker.stats_snapshot().details()
+            except Exception:  # noqa: BLE001 - 统计出问题也不能把红灯弄丢
+                details = ""
+            self._link_status.show_fault(self._link_fault, details)
+            return
         try:
             snapshot = self._worker.stats_snapshot()
         except Exception as exc:  # noqa: BLE001 - 统计出问题不能拖垮状态栏
             self._link_status.setToolTip(f"链路统计不可用：{exc}")
             return
         self._link_status.update_snapshot(snapshot)
+        # CRC / 帧尾级坏帧在解码层就被丢掉，走不到 _on_frame 的载荷预检，
+        # 所以状态栏的「坏帧 N」要在这里补上这部分（card33：注入坏帧后
+        # 用户必须能在界面上看见计数，而不是只有一句"日志里刷过去了"）。
+        try:
+            wire_bad = int(getattr(snapshot, "bad_frames", 0))
+        except Exception:  # noqa: BLE001 - 统计字段缺失不该影响质量灯
+            wire_bad = 0
+        if wire_bad > 0:
+            total_bad = self._parse_errors + wire_bad
+            self._parse_stat.setText(f"坏帧 {total_bad}")
+            reason = getattr(snapshot, "quality_reason", "") or ""
+            self._parse_stat.setToolTip(
+                f"{reason}\n其中解码层坏帧 {wire_bad} 个、载荷层坏帧 {self._parse_errors} 个。"
+                "常见于波特率不一致、线序/干扰、固件与上位机版本不匹配。"
+            )
+            self._parse_stat.show()
+            now = time.monotonic()
+            if wire_bad > self._wire_bad_logged and now - self._wire_bad_log_at >= 10.0:
+                self._wire_bad_logged = wire_bad
+                self._wire_bad_log_at = now
+                self._log.log(
+                    UserMessage(
+                        phenomenon=f"链路上出现坏帧（已累计 {wire_bad} 个，状态栏可看总数）",
+                        cause=(
+                            "CRC 校验或帧尾对不上：波特率 / 线序不一致、线路干扰，"
+                            "或固件与上位机版本不匹配都会这样"
+                        ),
+                        next_step=(
+                            "先核对 115200 8N1 与接线；换短一点的线和共地；"
+                            "基线稳下来后导出帧日志，用来定位是哪类帧先坏"
+                        ),
+                    ).as_block()
+                )
+
+    # ---- 链路设置：心跳开关 / 统计清零（card32） ----
+
+    def build_link_settings_dialog(self) -> LinkSettingsDialog:
+        """构造链路设置对话框（不 exec）：测试与截图脚本都走这个入口。"""
+        dialog = LinkSettingsDialog(
+            heartbeat_interval=float(self._comm_settings["heartbeat_interval_s"]),
+            heartbeat_max_missed=int(self._comm_settings["heartbeat_max_missed"]),
+            parent=self,
+        )
+        dialog.heartbeatChanged.connect(self._on_heartbeat_changed)
+        dialog.statsReset.connect(self._on_stats_reset)
+        self._link_settings_dialog = dialog
+        return dialog
+
+    def _show_link_settings(self) -> None:
+        self.build_link_settings_dialog().exec()
+
+    def _on_heartbeat_changed(self, interval_s: float, max_missed: int) -> None:
+        """改心跳参数：立刻作用在当前连接上（不需要断开重连），并写回配置。"""
+        interval, missed = self._worker.set_heartbeat(interval_s, max_missed)
+        self._comm_settings["heartbeat_interval_s"] = interval
+        self._comm_settings["heartbeat_max_missed"] = missed
+        self._comm_settings["idle_timeout_s"] = self._worker.idle_timeout
+        if interval > 0.0:
+            self._log.log(
+                f"心跳已开启：每 {interval:g} s 发一次 PING，连续 {missed} 次无应答"
+                f"且同窗口内没有遥测才判死（判死窗口 {self._worker.idle_timeout:.1f} s）"
+            )
+        else:
+            self._log.log(
+                "心跳已关闭：回到空闲 "
+                f"{IDLE_TIMEOUT_NO_HEARTBEAT_S:.1f} s 判死（与旧版行为一致）"
+            )
+        self._persist_comm_settings()
+        self._refresh_link_status()
+
+    def _on_stats_reset(self) -> None:
+        self._worker.reset_stats()
+        self._log.log(
+            "链路统计已清零：收发帧数 / 坏帧 / 约丢帧 / RTT 从 0 重新计（连接没有断开）"
+        )
+        self._refresh_link_status()
+
+    def _on_fault_config(self, config) -> None:
+        """故障注入滑杆（card33）-> ``LinkConfig``：立刻作用于当前仿真链路。"""
+        self._comm_degradation = {
+            "enabled": bool(getattr(config, "enabled", False)),
+            "drop_down": min(max(float(getattr(config, "drop_down", 0.0)), 0.0), 1.0),
+            "bad_crc_down": min(max(float(getattr(config, "bad_crc_down", 0.0)), 0.0), 1.0),
+            "disconnect_after_s": max(
+                float(getattr(config, "disconnect_after_s", 0.0)), 0.0
+            ),
+        }
+        applied = self._apply_degradation()
+        text = getattr(config, "describe", None)
+        describe = text() if callable(text) else "故障注入参数已更新"
+        if not applied and self._comm_degradation["enabled"]:
+            describe += "（连上内置模拟器后生效）"
+        self._log.log(describe)
+        self._persist_comm_settings()
+        self._refresh_link_status()
+
+    def _apply_degradation(self) -> bool:
+        """把当前劣化参数推给已建好的劣化层；没建过就返回 False。"""
+        if self._sim_degraded is None:
+            return False
+        try:
+            from ..sim.degradation import LinkConfig
+
+            values = dict(self._comm_degradation)
+            self._sim_degraded.apply(
+                LinkConfig(
+                    enabled=bool(values.get("enabled", False)),
+                    drop_down=float(values.get("drop_down", 0.0)),
+                    bad_crc_down=float(values.get("bad_crc_down", 0.0)),
+                    disconnect_after_s=float(values.get("disconnect_after_s", 0.0)),
+                )
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 - 劣化层出错不能拖垮界面
+            self._log.log(f"劣化参数没有应用成功：{exc}")
+            return False
+
+    def _persist_comm_settings(self) -> None:
+        """把 comm 段写回 config.json（心跳三项 + 仿真劣化）。
+
+        ``idle_timeout_s`` 一并删掉：它是由「间隔 × 次数」推导的，留着手工值会让
+        改了间隔之后判死窗口不跟着变——这正是"改了没用"的经典来源。
+        """
+        try:
+            cfg, _warning = load_config()
+            if not isinstance(cfg, dict):
+                return
+            comm = cfg.get("comm")
+            if not isinstance(comm, dict):
+                comm = {}
+            comm.update({
+                "heartbeat_interval_s": float(self._comm_settings["heartbeat_interval_s"]),
+                "heartbeat_max_missed": int(self._comm_settings["heartbeat_max_missed"]),
+                "trace_capacity": int(self._comm_settings["trace_capacity"]),
+                "sim_degradation": dict(self._comm_degradation),
+            })
+            comm.pop("idle_timeout_s", None)
+            cfg["comm"] = comm
+            save_config(cfg)
+        except Exception as exc:  # noqa: BLE001 - 存不下就算了，本次改动仍已生效
+            self._log.log(f"链路设置写入 config.json 失败：{exc}（本次设置已生效）")
+
+    def _heartbeat_misses(self) -> int:
+        """心跳累计欠账次数（取自链路统计）；读不到就返回 0，文案退化成不带数字。"""
+        try:
+            return max(int(self._worker.stats_snapshot().heartbeat_misses), 0)
+        except Exception:  # noqa: BLE001 - 统计不可用时不能连带断线提示一起坏
+            return 0
 
     def _on_auto_reconnect_toggled(self, checked: bool) -> None:
         """切开关时的说明：默认关，是为了让掉线先被看见。"""
@@ -982,6 +1240,31 @@ class MainWindow(QMainWindow):
         self._frame_log_dialog = dialog
         dialog.exec()
 
+    def replay_from_file(self, path: str = "") -> bool:
+        """离线回放（card33）：选 JSONL 后直接按原时序驱动界面。
+
+        与「帧日志 / 回放…」的区别：这条入口不先摊开列表，选完就播，适合
+        "别人发来一份帧流，我想立刻看现场"。回放是只读重演，不打开任何真实
+        通道，也不会下发命令（``_on_replay_started`` 会先断开实时连接）。
+        """
+        if not path:
+            path, _selected = QFileDialog.getOpenFileName(
+                self, "回放帧记录", "", "JSONL (*.jsonl);;所有文件 (*)"
+            )
+        if not path:
+            return False
+        dialog = self.build_frame_log_dialog()
+        self._frame_log_dialog = dialog
+        if not dialog.load_file(path):
+            dialog.show()
+            return False
+        dialog.toggle_play()
+        dialog.show()
+        return True
+
+    def _replay_from_file(self) -> None:
+        self.replay_from_file()
+
     def _on_replay_started(self) -> None:
         """回放前把现场清干净：实时连接断掉，曲线时间轴从 0 重来。"""
         if self._worker.connected:
@@ -1042,6 +1325,28 @@ class MainWindow(QMainWindow):
 
         params = self._current_sim_params()
         transport = SimTransport()
+        degraded = None
+        # card32 / card33：仿真通道始终套一层劣化包装，但默认 enabled=False——
+        # 不丢字节、不起后台线程（零开销直通），滑杆一动就能立刻作用，用户
+        # 不必为了试故障而断开重连。
+        try:
+            from ..sim.degradation import DegradedTransport, LinkConfig
+
+            degraded = DegradedTransport(
+                transport,
+                LinkConfig(
+                    enabled=bool(self._comm_degradation.get("enabled", False)),
+                    drop_down=float(self._comm_degradation.get("drop_down", 0.0)),
+                    bad_crc_down=float(self._comm_degradation.get("bad_crc_down", 0.0)),
+                    disconnect_after_s=float(
+                        self._comm_degradation.get("disconnect_after_s", 0.0)
+                    ),
+                ),
+            )
+            transport = degraded
+        except Exception as exc:  # noqa: BLE001 - 劣化层缺失不该挡住仿真通道
+            self._log.log(f"劣化层没有加载成功，按直通连接：{exc}")
+            degraded = None
         plant = Plant(PlantParams(**_plant_kwargs(params)))
         period_s = float(params.get("period_ms", 50)) / 1000.0
         engine = SimEngine(transport=transport, plant=plant, period_s=period_s)
@@ -1062,16 +1367,32 @@ class MainWindow(QMainWindow):
             self._state_label.setStyleSheet(f"color: {COLORS['err']};")
             return
         self._sim_engine = engine
+        self._sim_degraded = degraded
         engine.start()
         self._apply_sim_params(params)
         self._log.log(
             f"已连接内置模拟器（进程内，无需外部进程）；"
             f"周期 {period_s * 1000:.0f} ms，对象 {_describe_plant(params)}"
+            + (
+                f"；链路劣化已开启（下行丢帧 "
+                f"{float(self._comm_degradation.get('drop_down', 0.0)) * 100:.0f}%、坏帧 "
+                f"{float(self._comm_degradation.get('bad_crc_down', 0.0)) * 100:.0f}%"
+                + (
+                    f"、{float(self._comm_degradation['disconnect_after_s']):g} s 后强制断线"
+                    if float(self._comm_degradation.get("disconnect_after_s", 0.0)) > 0.0
+                    else ""
+                )
+                + "）"
+                if degraded is not None and self._comm_degradation.get("enabled")
+                else ""
+            )
         )
 
     def _stop_sim_engine(self) -> None:
         engine = self._sim_engine
         self._sim_engine = None
+        # 劣化包装层随通道一起失效：下次连接按当时的设置重新决定包不包
+        self._sim_degraded = None
         if engine is None:
             return
         try:

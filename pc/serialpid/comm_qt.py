@@ -59,6 +59,22 @@ class CommWorker(QObject):
     def heartbeat_interval(self) -> float:
         return self._core.heartbeat_interval
 
+    @property
+    def heartbeat_max_missed(self) -> int:
+        return self._core.heartbeat_max_missed
+
+    @property
+    def idle_timeout(self) -> float:
+        return self._core.idle_timeout
+
+    def set_heartbeat(self, interval_s: float, max_missed: int | None = None) -> tuple:
+        """界面改心跳参数：原连接上立即生效，返回夹取后的 (间隔, 次数)。"""
+        return self._core.set_heartbeat(interval_s, max_missed)
+
+    def reset_stats(self) -> None:
+        """清空链路统计（界面「统计清零」按钮走这里）。"""
+        self._core.reset_stats()
+
     def stats_snapshot(self) -> LinkSnapshot:
         """当前链路质量快照（界面线程调用，线程安全）。"""
         return self._core.stats_snapshot()

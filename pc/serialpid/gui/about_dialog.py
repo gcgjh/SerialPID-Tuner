@@ -39,6 +39,12 @@ _DEPENDENCIES = (
     ("numpy", "numpy"),
 )
 
+#: 发行名与 import 名不一致时（PySide6 实际装成 PySide6_Essentials / _Addons）的别名表。
+#: 不查别名会出现"明明能跑，关于框却写未安装"这种自相矛盾的诊断信息。
+_DIST_ALIASES = {
+    "PySide6": ("PySide6-Essentials", "PySide6-Addons", "PySide6_Essentials"),
+}
+
 
 def program_version() -> str:
     """程序版本：优先读包属性，保证与打包脚本 / CHANGELOG 同一来源。"""
@@ -53,13 +59,39 @@ def program_version() -> str:
 
 
 def dependency_version(distribution: str) -> str:
-    """已安装依赖的版本；未安装如实返回「未安装」，不伪造。"""
-    try:
-        from importlib import metadata
+    """已安装依赖的版本；未安装如实返回「未安装」，不伪造。
 
-        return metadata.version(distribution)
-    except Exception:  # noqa: BLE001 - PackageNotFoundError / 元数据损坏都同样处理
+    Qt 系的发行名和 import 名经常不一致（``PySide6`` 实际装成
+    ``PySide6_Essentials``），所以先查别名表，再退回"导入模块读 ``__version__``"。
+    后一条很关键：只查发行名会让一个能正常运行的依赖被报成"未安装"。
+    """
+    from importlib import import_module, metadata
+
+    for name in (distribution, *_DIST_ALIASES.get(distribution, ())):
+        try:
+            return metadata.version(name)
+        except Exception:  # noqa: BLE001 - PackageNotFoundError / 元数据损坏都跳过
+            continue
+    try:
+        module = import_module(distribution)
+    except Exception:  # noqa: BLE001 - 连导入都不行，才算真没装
         return "未安装"
+    version = str(getattr(module, "__version__", "") or "").strip()
+    return version if version else "已安装（版本未声明）"
+
+
+def serial_backend_status() -> str:
+    """串口后端状态：与启动自检同一判定口径（不在两处各写一套）。
+
+    报"打不开串口 / 枚举不到设备"类问题时，这一行最能说明是环境问题还是
+    设备问题：后端模块没加载、或枚举模块异常，都会直接写在这里。
+    """
+    try:
+        from ..selftest import serial_backend_summary
+
+        return serial_backend_summary()
+    except Exception as exc:  # noqa: BLE001 - 自检模块缺失不该让关于框开不了
+        return f"无法检测（{type(exc).__name__}: {exc}）"
 
 
 def environment_rows() -> List[Tuple[str, str]]:
@@ -70,6 +102,7 @@ def environment_rows() -> List[Tuple[str, str]]:
         ("操作系统", platform.platform()),
     ]
     rows.extend((name, dependency_version(dist)) for name, dist in _DEPENDENCIES)
+    rows.append(("串口后端", serial_backend_status()))
     rows.append(("配置文件", default_config_path()))
     return rows
 
@@ -159,4 +192,5 @@ __all__ = [
     "diagnostic_text",
     "environment_rows",
     "program_version",
+    "serial_backend_status",
 ]

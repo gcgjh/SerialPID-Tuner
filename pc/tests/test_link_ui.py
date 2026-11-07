@@ -150,6 +150,38 @@ def test_six_disconnect_reasons_are_localized(win, reason):
     assert "现象：" in text and "下一步：" in text
 
 
+def test_disconnect_log_is_full_three_part_with_cause(win):
+    """卡35：状态栏之外，日志里必须是完整的三行（含"原因："），不是只有结论。"""
+    win._on_connection(False, "device-removed")
+    text = _log_text(win)
+    assert "现象：设备被拔出" in text
+    assert "原因：" in text
+    assert "下一步：" in text
+    message = win._last_disconnect_message
+    assert message is not None and message.cause
+
+
+def test_heartbeat_timeout_logs_miss_count_and_setting_hint(win):
+    """心跳判死要带 N 次与容忍上限，并指向「工具 → 链路设置…」。"""
+    win._comm_settings["heartbeat_max_missed"] = 4
+    win._worker._stats.note_heartbeat_gap(4)  # 模拟判死当刻"欠了 4 次心跳"
+    win._on_connection(False, "heartbeat-timeout")
+    text = _log_text(win)
+    assert "连续 4 次" in text
+    assert "容忍上限 4 次" in text
+    assert "链路设置" in text
+
+
+def test_worker_error_is_three_part_not_raw_prefix(win):
+    """线程回报的原始异常翻成三段式；不再出现 "错误: xxx" 这种只有结论的行。"""
+    win._on_worker_error("读取异常: ClearCommError failed (拒绝访问)")
+    text = _log_text(win)
+    assert "错误: " not in text
+    assert "现象：" in text and "原因：" in text and "下一步：" in text
+    assert "读取异常" in text, "原始异常要留在原因里，方便贴日志"
+    assert win._last_worker_error is not None
+
+
 def test_user_disconnect_says_so(win):
     win._on_connection(False, "closed")
     assert "已断开" in win._state_label.text()
