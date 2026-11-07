@@ -422,8 +422,8 @@ def _render_report(
         f"- 打包产物自检：由 `scripts/build.bat` / `build.sh` 在出包时执行，"
         f"结果见 `dist/selftest-exe.json`\n\n"
         f"## 未覆盖项\n\n"
-        f"- 真机联调未执行（本报告只覆盖 PC 侧离线链路）。\n"
-        f"- 自动重连、链路质量统计等 card28 功能不在本版本内。\n"
+        f"- 本报告只覆盖 PC 侧（含内置模拟器链路）；真机闭环按 `docs/bringup.md` 上板单独验证。\n"
+        f"- 长稳档（`--long-run`）与硬件时序不在本次自动发布范围内。\n"
         f"{dirty_section}"
     )
 
