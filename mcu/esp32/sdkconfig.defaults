@@ -1,0 +1,21 @@
+# SerialPID-Tuner ESP32 固件默认配置（card45）
+#
+# 只写与默认不同的项，其余走 ESP-IDF v6.0.1 的默认值。
+
+# 本机板子是 ESP32-D0WD-V3 + 4MB flash（实测，见 skill/esp32-idf-development）
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# 1ms 系统节拍：10ms 控制周期用 vTaskDelayUntil 时，100Hz tick 会把周期
+# 量化到 10ms 整数倍而看不出抖动，1000Hz 才能量出真实抖动
+CONFIG_FREERTOS_HZ=1000
+
+# UART0 被协议独占：日志默认关到 ERROR（panic 仍有输出），
+# 避免 INFO 行夹在二进制帧里让上位机日志面板出现"坏帧"
+CONFIG_LOG_DEFAULT_LEVEL_ERROR=y
+
+# app_main 只做初始化就返回，工作都在两个任务里，栈留足即可
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# 主频 240MHz（默认即是，显式写出来便于对照文档）
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
