@@ -90,6 +90,12 @@
 #define PID_EXAMPLE_PWM_ARR 999u
 #endif
 
+/** PWM 通道：CubeMX > Timers > TIM3 > Channel 选哪一个，就填对应 TIM_CHANNEL_x。
+ *  默认 CH1（通用模板）；具体板子（如 H750VB 板载 TIM3_CH4/PB1）在 main.h 里覆盖。 */
+#ifndef PID_EXAMPLE_PWM_CHANNEL
+#define PID_EXAMPLE_PWM_CHANNEL TIM_CHANNEL_1
+#endif
+
 /** CCR 上限取 ARR+1：CCR > ARR 时输出恒为高，正好对应 100% 占空比 */
 #define PID_EXAMPLE_PWM_CCR_MAX (PID_EXAMPLE_PWM_ARR + 1u)
 
@@ -193,7 +199,7 @@ static void bsp_write_output(void *ctx, float out_percent)
         if (ccr > PID_EXAMPLE_PWM_CCR_MAX) {
             ccr = PID_EXAMPLE_PWM_CCR_MAX;
         }
-        __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, ccr);
+        __HAL_TIM_SET_COMPARE(&htim3, PID_EXAMPLE_PWM_CHANNEL, ccr);
     }
 #endif
 }
@@ -393,7 +399,7 @@ void PID_Example_Init(void)
 #if !PID_DEMO_SIMULATED_PLANT
     /* 真实 IO：开 PWM 通道。MX_TIM3_Init 只配好寄存器，通道必须显式 Start，
      * 少这一句的现象是"参数照常下发、ACK 正常、就是没有输出"。 */
-    (void)HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+    (void)HAL_TIM_PWM_Start(&htim3, PID_EXAMPLE_PWM_CHANNEL);
 #endif
 }
 
