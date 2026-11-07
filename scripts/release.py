@@ -308,7 +308,16 @@ def step_smoke(artifact: Path) -> str:
             raise StepError(f"产物启动后 {SMOKE_SECONDS}s 内退出，退出码 {process.returncode}")
     finally:
         if process.poll() is None:
-            process.terminate()
+            if sys.platform.startswith("win"):
+                # PyInstaller 的 onefile 启动器会把真正进程放到子进程里，terminate()
+                # 只关掉启动器，GUI 子进程仍活着并占住 exe（下一次打包 unlink 就 WinError 5）。
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                process.terminate()
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
