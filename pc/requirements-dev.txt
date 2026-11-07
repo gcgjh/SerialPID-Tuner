@@ -1,0 +1,6 @@
+# 开发 / 打包 / 测试依赖（在 requirements.txt 运行依赖之上追加）
+-r requirements.txt
+
+pyinstaller>=6.0
+pillow>=10.0
+pytest>=8.0

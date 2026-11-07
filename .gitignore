@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 打包产物
+dist/
+build/
+*.exe
+*.pkg
+# PyInstaller 命令行构建会在工作目录自动生成同名 *.spec，属构建副产物、不入库；
+# 本项目不以 spec 作为构建入口（参数全部内联在 scripts/build.bat / build.sh）
+*.spec
+
+# 日志与导出（本地数据不入库）
+logs/
+exports/
+*.csv
+
+# IDE
+.vscode/
+.idea/
