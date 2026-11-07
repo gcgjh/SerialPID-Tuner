@@ -309,16 +309,20 @@ class CommCore:
             self._on_connect(False, str(exc))
             return False
 
-        self._stop.clear()
-        # 新会话：统计与帧日志都从零开始（上一路的丢帧数不该带到这一路）
+        # 每次连接一个独立的停止信号：不能复用同一个 Event 再 clear()，
+        # 旧线程还活着的时候 clear 等于把它"复活"，它会在已关闭的旧传输上再读，
+        # 读超时后走 _drop 把刚建立的新连接标记成断开（2026-11-07 macos CI：
+        # test_drop_then_reconnect_keeps_new_connection「新连接被旧线程收尾误关」）。
+        stop = threading.Event()
+        self._stop = stop
         self.stats.reset()
         self.trace.reset()
         with self._lock:
             self._transport = tr
             self._connected = True
             self._last_rx = time.monotonic()
-        # 传输对象按参数传入线程，线程不再回读 self._transport
-        self._thread = threading.Thread(target=self._run, args=(tr,), daemon=True)
+        # 传输对象与停止信号都按参数传入线程，线程不再回读共享字段
+        self._thread = threading.Thread(target=self._run, args=(tr, stop), daemon=True)
         self._thread.start()
         self._on_connect(True, target)
         return True
@@ -429,7 +433,7 @@ class CommCore:
         self.stats.note_tx(len(raw))
         self.trace.append(DIR_TX, pkt_type, payload)
 
-    def _run(self, tr: Transport) -> None:
+    def _run(self, tr: Transport, stop: threading.Event) -> None:
         dec = FrameDecoder()
         last_rx = self._last_rx
         empty_streak = 0
@@ -454,7 +458,7 @@ class CommCore:
         seen_bad = 0
 
         try:
-            while not self._stop.is_set():
+            while not stop.is_set():
                 now = time.monotonic()
 
                 # ---- 参数可能在运行期被界面改过：每轮取一次快照 ----
@@ -481,7 +485,7 @@ class CommCore:
                         self._write(tr, PacketType.PING)
                     except (OSError, TransportError) as exc:
                         self._on_error(f"心跳发送失败: {exc}")
-                        self._drop(DROP_WRITE_ERROR)
+                        self._drop(DROP_WRITE_ERROR, tr)
                         return
                     pending_pings.append(time.monotonic())
                     missed += 1
@@ -494,12 +498,12 @@ class CommCore:
                     data = tr.read(1024)
                 except PeerClosed as exc:
                     self._on_error(f"对端关闭: {exc}")
-                    self._drop(DROP_PEER_CLOSED)
+                    self._drop(DROP_PEER_CLOSED, tr)
                     return
                 except OSError as exc:
                     reason = classify_transport_error(exc)
                     self._on_error(f"读取异常: {exc}")
-                    self._drop(reason)
+                    self._drop(reason, tr)
                     return
 
                 if data:
@@ -529,7 +533,7 @@ class CommCore:
                     if idle_timeout > 0:
                         idle = time.monotonic() - last_rx > idle_timeout
                         if idle or (max_empty is not None and empty_streak >= max_empty):
-                            self._drop(DROP_TIMEOUT)
+                            self._drop(DROP_TIMEOUT, tr)
                             return
                     # 节流：避免对端关闭后 read 立即返回造成忙等占满一个核
                     time.sleep(_EMPTY_SLEEP)
@@ -539,7 +543,7 @@ class CommCore:
                     silent_for = time.monotonic() - last_rx
                     if silent_for >= hb_window:
                         self.stats.note_heartbeat_gap(missed)
-                        self._drop(DROP_HEARTBEAT)
+                        self._drop(DROP_HEARTBEAT, tr)
                         return
 
                 # 排空发送队列
@@ -552,7 +556,7 @@ class CommCore:
                         tr.write(raw)
                     except (OSError, TransportError) as exc:
                         self._on_error(f"写入异常: {exc}")
-                        self._drop(DROP_WRITE_ERROR)
+                        self._drop(DROP_WRITE_ERROR, tr)
                         return
         finally:
             # 身份比较：共享字段仍指向自己这份传输才关闭并复位状态；
@@ -591,12 +595,15 @@ class CommCore:
         self.stats.note_rtt(rtt_ms)
         pending.clear()
 
-    def _drop(self, reason: str) -> None:
+    def _drop(self, reason: str, tr: Transport) -> None:
         """标记断开并通知上层；线程随后自行退出（不自动重连）。
 
-        重复掉线 / 边界竞态下只通知一次。
+        重复掉线 / 边界竞态下只通知一次；且只有"当前这份传输"才有资格把会话
+        标记成断开——旧线程收尾时新连接可能已经接上，不能让它把新连接按死。
         """
         with self._lock:
+            if self._transport is not tr:
+                return
             if not self._connected:
                 return
             self._connected = False
