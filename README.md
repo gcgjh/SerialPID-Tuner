@@ -47,7 +47,8 @@ Ziegler-Nichols 辅助整定、CSV 曲线导出；MCU 侧提供零 HAL 依赖的
   复制诊断信息；所有失败提示统一成「现象 / 原因 / 下一步」三段式。
 - **整定与验证工具**：`tools/sweep_params.py` 批量扫 Kp / Ki 并标振荡临界点；
   `tools/replay_frames.py` TCP 回放帧记录；`tools/pressure_test.py` 长稳压测；
-  `tools/bringup_check.py` 把上板八步落成一条命令。
+  `tools/bringup_check.py` 把上板八步落成一条命令；`tools/walkthrough_35.py`
+  对 F1 帮助 / 首启向导 / 关于框做离屏自动走查并留截图与 `report.json`。
 - **真机工程**：`mcu/h7_board/` 为 STM32H750VBT6 可烧录 HAL 工程（`build.ps1` /
   `flash.ps1`），上板流程与判据见 [`docs/bringup.md`](docs/bringup.md)。
 - **深色主题**：内置统一配色的深色界面，曲线颜色与面板配色集中在 `gui/theme.py`。
