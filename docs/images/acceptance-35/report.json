@@ -1,0 +1,225 @@
+{
+  "generated_by": "tools/walkthrough_35.py（离屏脚本走查）",
+  "out": "C:\\Users\\shehu\\Desktop\\串口PID\\SerialPID-Tuner\\docs\\images\\acceptance-35",
+  "total": 43,
+  "failed": 0,
+  "steps": [
+    {
+      "step": "onboarding/首启未看过",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "onboarding/第 1 屏可显示",
+      "ok": true,
+      "detail": "1 / 3"
+    },
+    {
+      "step": "onboarding/第 2 屏可显示",
+      "ok": true,
+      "detail": "2 / 3"
+    },
+    {
+      "step": "onboarding/第 3 屏可显示",
+      "ok": true,
+      "detail": "3 / 3"
+    },
+    {
+      "step": "onboarding/末屏按钮变成完成",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "onboarding/跳过被记住",
+      "ok": true,
+      "detail": "True"
+    },
+    {
+      "step": "onboarding/配置落盘",
+      "ok": true,
+      "detail": "C:\\Users\\shehu\\AppData\\Local\\Temp\\tmp_6xia06t\\config.json"
+    },
+    {
+      "step": "onboarding/重开不再弹",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "onboarding/主窗口不再弹",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/按 F1 弹出帮助",
+      "ok": true,
+      "detail": "['使用帮助']"
+    },
+    {
+      "step": "help/内容来自手册同源",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/手册路径可读",
+      "ok": true,
+      "detail": "C:\\Users\\shehu\\Desktop\\串口PID\\SerialPID-Tuner\\docs\\user_guide.md"
+    },
+    {
+      "step": "help/含「五分钟上手」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/含「界面速查」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/含「常见问题」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/来源标签指向真实手册",
+      "ok": true,
+      "detail": "内容来源：C:\\Users\\shehu\\Desktop\\串口PID\\SerialPID-Tuner\\docs\\user_guide.md"
+    },
+    {
+      "step": "help/坏 markdown 不崩",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "help/坏 markdown 仍与原文同源",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "about/版本号来自包属性",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "about/含串口后端",
+      "ok": true,
+      "detail": "serial.serialwin32 已加载，端口枚举可用"
+    },
+    {
+      "step": "about/串口后端与自检同源",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "about/依赖 PySide6 有版本",
+      "ok": true,
+      "detail": "6.9.3"
+    },
+    {
+      "step": "about/依赖 pyqtgraph 有版本",
+      "ok": true,
+      "detail": "0.14.0"
+    },
+    {
+      "step": "about/依赖 pyserial 有版本",
+      "ok": true,
+      "detail": "3.5"
+    },
+    {
+      "step": "about/依赖 numpy 有版本",
+      "ok": true,
+      "detail": "2.4.6"
+    },
+    {
+      "step": "about/复制诊断到剪贴板",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "about/诊断含三段之一：串口后端",
+      "ok": true,
+      "detail": [
+        "SerialPID-Tuner 诊断信息"
+      ]
+    },
+    {
+      "step": "about/诊断可整段粘贴",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "shots/两次文件名一致",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "shots/01-main-window.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0105%"
+    },
+    {
+      "step": "shots/01-main-window.png 尺寸稳定",
+      "ok": true,
+      "detail": "1280x860"
+    },
+    {
+      "step": "shots/02-sim-panel.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0105%"
+    },
+    {
+      "step": "shots/02-sim-panel.png 尺寸稳定",
+      "ok": true,
+      "detail": "1280x860"
+    },
+    {
+      "step": "shots/03-port-diagnosis.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0709%"
+    },
+    {
+      "step": "shots/03-port-diagnosis.png 尺寸稳定",
+      "ok": true,
+      "detail": "840x570"
+    },
+    {
+      "step": "shots/04-selftest-banner.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0039%"
+    },
+    {
+      "step": "shots/04-selftest-banner.png 尺寸稳定",
+      "ok": true,
+      "detail": "1280x860"
+    },
+    {
+      "step": "shots/05-step-metrics.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0000%"
+    },
+    {
+      "step": "shots/05-step-metrics.png 尺寸稳定",
+      "ok": true,
+      "detail": "644x736"
+    },
+    {
+      "step": "shots/06-statusbar.png 重跑无漂移",
+      "ok": true,
+      "detail": "diff=0.0000%"
+    },
+    {
+      "step": "shots/06-statusbar.png 尺寸稳定",
+      "ok": true,
+      "detail": "1240x98"
+    },
+    {
+      "step": "shots/加载到中文字体",
+      "ok": true,
+      "detail": "Microsoft YaHei、Microsoft YaHei UI、Microsoft YaHei"
+    },
+    {
+      "step": "shots/中文非豆腐块",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}
