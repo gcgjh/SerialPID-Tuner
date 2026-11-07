@@ -76,20 +76,31 @@ python -m serialpid.main
 
 ### 打包发行版
 
-Windows：
+Windows（[`scripts/build.bat`](scripts/build.bat)）：
 
 ```powershell
 scripts\build.bat
-# 产物：dist\SerialPID-Tuner-v0.2.0.exe（单文件、无控制台、带图标与版本信息）
+# 产物：dist\SerialPID-Tuner-v0.2.1.exe（单文件、无控制台、带图标与版本信息）
 #       dist\SerialPID-Tuner.exe（稳定名副本，供文档引用）
 ```
 
-Linux / macOS：
+Linux / macOS（[`scripts/build.sh`](scripts/build.sh)）：
 
 ```bash
-bash scripts/build.sh
-# 产物：dist/SerialPID-Tuner-v0.2.0、dist/SerialPID-Tuner
+bash scripts/build.sh            # 正常打包
+bash scripts/build.sh --check    # 只查打包前条件（依赖 / 图标 / 版本）
+bash scripts/build.sh --dry-run  # 打印将执行的命令，不实际打包
+
+# 产物（Linux）：dist/SerialPID-Tuner-v0.2.1-linux-x86_64.tar.gz
+#                （onedir：可执行文件 + _internal + .desktop + udev 规则 + 首次运行说明）
+# 产物（macOS）：dist/SerialPID-Tuner-v0.2.1-macos-arm64.zip
+#                （SerialPID-Tuner.app + 首次运行说明，图标取自 assets/app.icns）
 ```
+
+**PyInstaller 不能交叉打包**：Linux 包必须在 Linux 上打、macOS 包必须在 macOS 上打。
+三平台打包由 CI 的 `package` 矩阵负责（见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)），
+打 tag 时同一次流水线会把三份产物挂到 Release 页。平台差异、已知坑与验证边界见
+[`docs/PACKAGING.md`](docs/PACKAGING.md)。
 
 打包依赖见 [`pc/requirements-dev.txt`](pc/requirements-dev.txt)：PyInstaller / Pillow /
 pytest 均**锁定版本**，脚本用 `pip install -r` 安装而不是裸装，保证同一份源码换个时间
@@ -99,18 +110,61 @@ pytest 均**锁定版本**，脚本用 `pip install -r` 安装而不是裸装，
 构建脚本会优先使用项目环境（`../.venv`）里的解释器，找不到才回退 `PATH` 中的 `python`，
 并在日志第一行打印实际使用的解释器路径；依赖已装好时跳过安装，不污染全局环境。
 
+### 下载与安装（给最终用户）
+
+正式发行版放在 GitHub Release 页（每次打 tag 由 CI 自动上传三平台产物 + 发布报告）：
+
+| 平台 | 下载物 | 第一次运行 |
+| --- | --- | --- |
+| Windows 10/11 | `SerialPID-Tuner-v<版本>.exe` | 双击即可，无需装 Python；SmartScreen 提示时选「更多信息 → 仍要运行」 |
+| Linux x86_64 | `SerialPID-Tuner-v<版本>-linux-x86_64.tar.gz` | `tar xzf ... && ./SerialPID-Tuner/SerialPID-Tuner`（保持目录结构，`_internal/` 不能拆走） |
+| macOS | `SerialPID-Tuner-v<版本>-macos-<arch>.zip` | 解压后把 `.app` 拖进「应用程序」；首次打开需右键 →「打开」绕过 Gatekeeper |
+
+每个 Release 附 `SHA256SUMS.txt`，可本地校验：
+
+```bash
+sha256sum -c SHA256SUMS.txt        # Linux
+shasum -a 256 -c SHA256SUMS.txt    # macOS
+certutil -hashfile SerialPID-Tuner-v0.2.1.exe SHA256   # Windows
+```
+
+**Linux 串口权限（普通用户必看）**：默认只有 `dialout` 组能读写 `/dev/ttyUSB*`，
+不在组里会报"权限不足 / Permission denied"。把自己加入该组后**重新登录**：
+
+```bash
+sudo usermod -aG dialout "$USER"
+# 退出登录再进入（或 newgrp dialout）才生效
+groups "$USER"        # 应能看到 dialout
+```
+
+个别发行版的 `uaccess` 规则不覆盖 CH340/CP210x，可另装 udev 规则
+（打包目录里的 `serialpid-udev.rules`，或手册
+[`docs/user_guide.md`](docs/user_guide.md) 的「Linux 串口权限」一节）。
+
+缺 `libGL.so.1` / `libEGL.so.1` 时（最小化安装的发行版）先补运行库：
+
+```bash
+sudo apt install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3   # Debian/Ubuntu
+sudo dnf install -y mesa-libGL mesa-libEGL                     # Fedora
+```
+
 ### 发布（测试 → 自检 → 打包 → 校验 → 冒烟 → 报告）
 
 ```powershell
 ..\.venv\Scripts\python.exe scripts\release.py
-# 报告归档：docs\releases\v0.2.0.md（版本 / commit / 构建源 / 测试结果 / 产物 SHA-256）
+# 报告归档：docs\releases\v<版本>.md（版本 / commit / 构建源 / 测试结果 / 产物 SHA-256）
 
 # 工作区里还有别人的未提交改动时，从 HEAD 的干净副本构建：
-..\.venv\Scripts\python.exe scripts\release.py --clean-tree --allow-dirty
+..\.venv\Scripts\python.exe scripts\release.py --clean-tree
 ```
 
+> `--allow-dirty` 只用于排障：它会直接用当前工作区打包，产物不保证与任何提交
+> 一一对应，不要写进发布记录。正常发布只用 `--clean-tree`。
+
 发布脚本**不自动打 tag、不自动上传**：变更日志与截图由人确认后再发。
-只想查"exe 有没有落后源码"时单独跑：
+打了 tag 之后，CI 的 `release` job 会用 `scripts/make_release_body.py` 把
+`docs/releases/v<版本>.md` + 三平台下载表合成 Release 附注并挂载产物。
+只想查"产物有没有落后源码"时单独跑：
 
 ```powershell
 ..\.venv\Scripts\python.exe scripts\check_artifact_freshness.py --require

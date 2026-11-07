@@ -62,10 +62,29 @@
 
 ## 5. 持续集成
 
-- [ ] `.github/workflows/ci.yml` 五个 job 全绿：PC 常规 / PC 长稳（允许失败但要可见）/
-      MCU 主机 / ARM 交叉编译 / 出包与产物新鲜度
+- [ ] `.github/workflows/ci.yml` 七个 job 全绿：PC 常规（Windows 硬门槛）/
+      PC 跨平台观测（ubuntu + macOS）/ PC 长稳（允许失败但要可见）/ MCU 主机 /
+      ARM 交叉编译 / 三平台出包矩阵 / Release 分发页（仅 tag 触发）
 - [ ] CI 出包 job 的产物可下载，且 `check_artifact_freshness.py --require` 通过
-- [ ] CI 只出包不发布：没有自动 tag、没有自动上传 release
+- [ ] **三平台各出一份**：`SerialPID-Tuner-v<ver>.exe` / `-linux-<arch>.tar.gz` /
+      `-macos-<arch>.zip`，三份都带 `selftest-<platform>.json`
+- [ ] CI 只出包不发布：分支推送不建 Release；只有 `push tag v*` 才走 release job
+
+## 5b. 跨平台打包（card37）
+
+- [ ] **图标三件齐全**：`python tools/make_icon.py --check` 输出 ico / png / icns
+- [ ] **Linux 分支命令正确**（任意平台可查）：`bash scripts/build.sh --dry-run --platform linux`
+      打出的命令含 `--onedir`、`--icon assets/app.png`、产物名 `-linux-<arch>.tar.gz`
+- [ ] **macOS 分支命令正确**：同上 `--platform macos`，含 `--icon assets/app.icns` 与
+      `--osx-bundle-identifier`，产物名 `-macos-<arch>.zip`
+- [ ] **Linux 包内包含**：可执行 + `_internal/` + `.desktop` + `serialpid-udev.rules` +
+      `首次运行.md`
+- [ ] **Linux 串口权限文档在位**：`README.md`「下载与安装」与
+      `docs/user_guide.md` 2.1 都有 `usermod -aG dialout` 与 udev 规则示例
+- [ ] **macOS Gatekeeper 说明在位**：README / 手册 / Release 附注都写"右键 → 打开"
+- [ ] **Release 附注可生成**：`python scripts/make_release_body.py --version <ver> --artifacts dist --out body.md`
+      生成的表格含三平台文件名、大小、自检摘要、SHA-256 前 12 位，并附 `SHA256SUMS.txt`
+- [ ] **首页下载说明与产物命名一致**：README 表格里的文件名 = CI 实际上传的文件名
 
 ## 6. 许可证与文档口径
 
@@ -123,3 +142,19 @@
     它们的功能会在各自卡片提交后由后续版本打包。工作区当前全量用例为
     `280 passed / 6 skipped / 52 subtests`（含未提交的新用例），报告里的 171 项
     是 HEAD 上已提交的那部分。
+
+- **2026-11-07 第六轮（card37 跨平台打包与分发）**：CI 由"Windows 单线"扩成三平台——
+  新增 `package` 矩阵（windows / ubuntu / macos 各打各的包，产物按平台命名）与
+  `release` job（仅 `push tag v*` 触发，汇总三份产物 + 发布报告挂 Release）；
+  `build.sh` 重写为 Linux onedir tar.gz / macOS .app zip 两条分支，带 `--check` /
+  `--dry-run` / `--platform` 便于在任意平台验证分支命令；`tools/make_icon.py` 增出
+  `assets/app.icns`（Pillow 跨平台可写，macOS job 不必等 `iconutil`）；
+  新增 `scripts/make_release_body.py`（下载表 + 自检摘要 + `SHA256SUMS.txt`）；
+  `check_artifact_freshness.py` 的产物判据补 `.tar.gz` / `.zip` / `.AppImage`；
+  README 与手册补三平台下载说明与 Linux `dialout` / udev 权限、macOS Gatekeeper 路径。
+  - **本机可验证部分**：Windows 全流程仍走 `release.py`（产物与 v0.2.1 行为一致）；
+    Linux/macOS 分支以 `bash -n` + `--dry-run` 验证命令正确；工作流以 YAML 解析 +
+    `pc/tests/test_packaging.py` 验证矩阵与 release 触发条件；附注生成用假产物跑通。
+  - **未验证（需 CI 首跑）**：Linux / macOS 真实出包与启动、Release 页真实挂载。
+    本机无 Linux/macOS 环境、仓库无 remote，无法给出运行证据——详见
+    [`PACKAGING.md`](PACKAGING.md) 第七节。
