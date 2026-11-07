@@ -1,9 +1,11 @@
-# PyInstaller Windows 版本资源（--version-file 读取）
-# 版本号与 README / 包内版本保持同步；修改后重新打包即生效。
+# PyInstaller Windows 版本资源（--version-file 读取）。
+# 由 tools/make_version_info.py 从 pc/serialpid/__init__.py 的 __version__ 生成，请勿手改；
+# 打包脚本（scripts/build.bat / build.sh）在调用 PyInstaller 前会重新生成一次。
+
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(0, 2, 0, 0),
+    prodvers=(0, 2, 0, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -18,11 +20,11 @@ VSVersionInfo(
         '080404B0',
         [StringStruct('CompanyName', 'SerialPID-Tuner'),
          StringStruct('FileDescription', 'Serial PID Tuner (serial PID commissioning tool)'),
-         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('FileVersion', '0.2.0.0'),
          StringStruct('InternalName', 'SerialPID-Tuner'),
          StringStruct('OriginalFilename', 'SerialPID-Tuner.exe'),
          StringStruct('ProductName', 'SerialPID-Tuner'),
-         StringStruct('ProductVersion', '1.0.0.0'),
+         StringStruct('ProductVersion', '0.2.0.0'),
          StringStruct('LegalCopyright', 'MIT License'),
          StringStruct('Comments', 'Step test, Ziegler-Nichols assist, real-time telemetry.')])
       ]),
