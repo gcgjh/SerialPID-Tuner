@@ -1,0 +1,131 @@
+# SerialPID-Tuner 持续集成（card26）
+#
+# 四档硬门槛 + 一档出包验证：
+#   1. PC 测试（常规）          —— 275 passed / 6 skipped 的基线必须一直绿
+#   2. PC 测试（长稳档）        —— 单独 job，允许失败但结果可见（continue-on-error）
+#   3. MCU 主机测试            —— gcc 编译两个运行器并执行
+#   4. ARM 交叉编译            —— 三核心模块 + 两份 HAL 示例桩，-Wall -Wextra 零告警
+#   5. 出包 + 产物新鲜度       —— 真打一次 exe，再验证 exe 晚于实现源码
+#
+# 第 5 档存在的理由：产物新鲜度检查如果只在没产物的环境里跑，永远只会打印"跳过"，
+# 等于没检查。CI 上真打一次包，这条判据才有效。
+#
+# CI 只出包、不发布：tag 与分发由人确认变更日志后手动做。
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  pc-tests:
+    name: PC 测试（常规）
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pc/requirements-dev.txt
+      - name: 安装依赖（requirements-dev.txt 锁定版本）
+        run: python -m pip install -r pc/requirements-dev.txt
+      - name: 版本资源与包内版本一致
+        run: python tools/make_version_info.py --check
+      - name: 运行 PC 全量测试
+        working-directory: pc
+        run: python -m pytest tests -q
+
+  pc-tests-long-run:
+    name: PC 测试（长稳档，允许失败）
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pc/requirements-dev.txt
+      - name: 安装依赖（requirements-dev.txt 锁定版本）
+        run: python -m pip install -r pc/requirements-dev.txt
+      - name: 运行长稳压测
+        working-directory: pc
+        run: python -m pytest tests/test_long_run.py --long-run -q
+
+  mcu-host-tests:
+    name: MCU 主机测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 确认编译器
+        run: gcc --version | head -n 1
+      - name: 编译并运行两个主机测试器
+        run: pwsh mcu/test/run_host_test.ps1
+
+  arm-cross-compile:
+    name: ARM 交叉编译（三模块 + HAL 示例桩）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Arm GNU Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+      - name: 交叉编译（-Wall -Wextra 零告警为门槛）
+        run: pwsh scripts/verify_mcu_build.ps1 -SkipRealHal
+
+  release-artifact:
+    name: 出包与产物新鲜度
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pc/requirements-dev.txt
+      - name: 安装依赖（requirements-dev.txt 锁定版本）
+        run: python -m pip install -r pc/requirements-dev.txt
+      - name: 源码环境启动自检
+        run: python pc/main.py --selftest --json
+      - name: 打包（scripts/build.bat 自带出包后自检）
+        run: cmd /c scripts\build.bat
+      - name: 产物新鲜度：exe 必须晚于实现源码
+        run: python scripts/check_artifact_freshness.py --require
+      - name: 校验 exe 版本资源
+        run: |
+          $ver = (python tools/make_version_info.py --version).Trim()
+          $quad = "$ver.0"
+          $exe = Get-ChildItem dist\SerialPID-Tuner-v*.exe | Select-Object -First 1
+          $info = $exe.VersionInfo
+          Write-Host "$($exe.Name) FileVersion=$($info.FileVersion) ProductVersion=$($info.ProductVersion) 期望=$quad"
+          if ($info.FileVersion -ne $quad) { throw "FileVersion 与包内版本不符：$($info.FileVersion)" }
+          if ($info.ProductVersion -ne $quad) { throw "ProductVersion 与包内版本不符：$($info.ProductVersion)" }
+      - name: 上传产物与自检结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: SerialPID-Tuner-windows
+          path: |
+            dist/*.exe
+            dist/selftest-*.json
+          if-no-files-found: error
