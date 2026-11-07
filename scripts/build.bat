@@ -22,7 +22,9 @@ cd /d "%~dp0.."
 
 set "VENV_PY=%~dp0..\..\.venv\Scripts\python.exe"
 set "PY="
-if exist "%VENV_PY%" set "PY=%VENV_PY%"
+rem 外部可指定解释器：release.py 的干净 worktree 构建与 CI 复用已有环境都靠它
+if defined SERIALPID_PYTHON if exist "%SERIALPID_PYTHON%" set "PY=%SERIALPID_PYTHON%"
+if not defined PY if exist "%VENV_PY%" set "PY=%VENV_PY%"
 if not defined PY (
   where python >nul 2>nul
   if errorlevel 1 (

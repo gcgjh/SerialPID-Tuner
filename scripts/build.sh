@@ -19,7 +19,10 @@ cd "$(dirname "$0")/.."
 ROOT_DIR="$(pwd)"
 
 VENV_PY="$ROOT_DIR/../.venv/bin/python"
-if [ -x "$VENV_PY" ]; then
+# 外部可指定解释器：release.py 的干净 worktree 构建与 CI 复用已有环境都靠它
+if [ -n "${SERIALPID_PYTHON:-}" ] && [ -x "${SERIALPID_PYTHON}" ]; then
+  PY="$SERIALPID_PYTHON"
+elif [ -x "$VENV_PY" ]; then
   PY="$VENV_PY"
 elif [ -n "${PYTHON:-}" ]; then
   PY="$PYTHON"

@@ -35,6 +35,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -160,12 +161,12 @@ def _is_release_own_file(path: str) -> bool:
     return normalised.startswith("dist/") or normalised.startswith("docs/releases/")
 
 
-def step_tests() -> Dict[str, str]:
+def step_tests(repo_dir: Path = ROOT) -> Dict[str, str]:
     _say("[3/6] 全量 PC 测试 ...")
     started = time.time()
     code, output = _run(
         [sys.executable, "-m", "pytest", "tests", "-q"],
-        cwd=PC_DIR,
+        cwd=repo_dir / "pc",
         env={"QT_QPA_PLATFORM": "offscreen", "PYTHONUTF8": "1"},
         timeout=3600,
     )
@@ -184,11 +185,12 @@ def step_tests() -> Dict[str, str]:
     return {"summary": summary or "(未解析)", "elapsed": f"{elapsed:.1f}", "output": output}
 
 
-def step_selftest(tmp_dir: Path) -> Dict[str, str]:
+def step_selftest(tmp_dir: Path, repo_dir: Path = ROOT) -> Dict[str, str]:
     _say("[4/6] 源码环境启动自检 ...")
     out_path = tmp_dir / "selftest-src.json"
     code, output = _run(
-        [sys.executable, "pc/main.py", "--selftest", "--json", "--out", str(out_path)]
+        [sys.executable, "pc/main.py", "--selftest", "--json", "--out", str(out_path)],
+        cwd=repo_dir,
     )
     if code != 0 or not out_path.exists():
         raise StepError("源码环境启动自检有失败项", output + f"\n{out_path} 不存在")
@@ -197,36 +199,58 @@ def step_selftest(tmp_dir: Path) -> Dict[str, str]:
     return {"summary": str(report.get("summary", "?")), "json": report}
 
 
-def step_build(version: str) -> str:
-    """调用平台打包脚本，返回版本化产物路径。"""
-    _say("[5/6] 打包 ...")
+def step_build(version: str, repo_dir: Path = ROOT) -> Path:
+    """在 ``repo_dir`` 里调用平台打包脚本，返回版本化产物路径。
+
+    ``repo_dir`` 可能是一份干净 worktree（``--clean-tree``）：那时产物落在
+    worktree 的 ``dist/``，由调用方拷回主仓库。
+    """
+    _say(f"[5/6] 打包（源码目录 {repo_dir}）...")
+    env = {"SERIALPID_PYTHON": sys.executable}
     if sys.platform.startswith("win"):
-        code, output = _run(["cmd", "/c", "scripts\\build.bat"], timeout=2400)
+        code, output = _run(["cmd", "/c", "scripts\\build.bat"], cwd=repo_dir, env=env, timeout=2400)
     else:
-        code, output = _run(["bash", "scripts/build.sh"], timeout=2400)
+        code, output = _run(["bash", "scripts/build.sh"], cwd=repo_dir, env=env, timeout=2400)
     if code != 0:
         raise StepError("打包脚本失败", output)
     for line in output.strip().splitlines()[-6:]:
         _say(f"      {line}")
 
-    versioned = DIST_DIR / f"SerialPID-Tuner-v{version}.exe"
-    stable = DIST_DIR / "SerialPID-Tuner.exe"
+    dist = repo_dir / "dist"
+    versioned = dist / f"SerialPID-Tuner-v{version}.exe"
+    stable = dist / "SerialPID-Tuner.exe"
     if sys.platform.startswith("win"):
         if not versioned.exists():
             raise StepError(f"打包脚本没有产出 {versioned.name}", output)
         if not stable.exists():
             raise StepError(f"打包脚本没有留下稳定名副本 {stable.name}", output)
-        return str(versioned)
-    linux_versioned = DIST_DIR / f"SerialPID-Tuner-v{version}"
-    if not linux_versioned.exists():
-        raise StepError(f"打包脚本没有产出 {linux_versioned.name}", output)
-    return str(linux_versioned)
+    else:
+        versioned = dist / f"SerialPID-Tuner-v{version}"
+        if not versioned.exists():
+            raise StepError(f"打包脚本没有产出 {versioned.name}", output)
+
+    if repo_dir != ROOT:
+        DIST_DIR.mkdir(parents=True, exist_ok=True)
+        for source in (versioned, dist / ("SerialPID-Tuner.exe" if sys.platform.startswith("win") else "SerialPID-Tuner")):
+            if not source.exists():
+                continue
+            target = DIST_DIR / source.name
+            if target.exists():
+                target.unlink()
+            shutil.copy2(source, target)
+        for json_name in ("selftest-src.json", "selftest-exe.json"):
+            source = dist / json_name
+            if source.exists():
+                shutil.copy2(source, DIST_DIR / json_name)
+        versioned = DIST_DIR / versioned.name
+    return versioned
 
 
-def step_freshness(artifact: Path) -> Dict[str, str]:
+def step_freshness(artifact: Path, repo_dir: Path = ROOT) -> Dict[str, str]:
     _say("[6/6] 校验产物 ...")
     code, output = _run(
-        [sys.executable, "scripts/check_artifact_freshness.py", "--require"]
+        [sys.executable, "scripts/check_artifact_freshness.py", "--require"],
+        cwd=repo_dir,
     )
     lines = output.strip().splitlines()
     if code != 0:
@@ -301,6 +325,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _add_clean_worktree(tmp_dir: Path) -> Path:
+    """从 HEAD 拉一份干净 worktree 作为构建源。
+
+    共享仓库里多个任务并行时，工作区随时处于"改了一半"的状态——直接在主树上
+    打包，产物会混进别人未提交的半成品，测试结果也不可信。用 HEAD 的干净副本
+    构建，产物与提交一一对应，"验过的"就是"发出去的"。
+    """
+    path = tmp_dir / "src"
+    code, output = _run(["git", "worktree", "add", "--detach", "--force", str(path), "HEAD"])
+    if code != 0:
+        raise StepError("创建干净 worktree 失败", output)
+    return path
+
+
 _STABLE_COPY = "SerialPID-Tuner.exe"
 
 
@@ -325,6 +363,7 @@ def _render_report(
     hash_hex: str,
     fresh: Dict[str, str],
     smoke: str,
+    build_source: str,
     started_at: datetime.datetime,
     elapsed: float,
 ) -> str:
@@ -342,6 +381,7 @@ def _render_report(
         f"## 结论\n\n"
         f"- 版本：**v{version}**（唯一来源 `pc/serialpid/__init__.py`）\n"
         f"- 源码：`{git['branch']}` @ `{git['commit']}`；报告生成时工作区改动：{git['dirty']}\n"
+        f"- 构建源：{build_source}\n"
         f"- 生成时间：{started_at.strftime('%Y-%m-%d %H:%M:%S')}（耗时 {elapsed:.1f}s）\n"
         f"- 解释器：Python {platform.python_version()}（{sys.executable}）\n"
         f"- 平台：{platform.platform()}\n\n"
@@ -375,6 +415,8 @@ def _render_report(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="SerialPID-Tuner 一键发布（测试→自检→打包→校验→冒烟→报告）")
     parser.add_argument("--allow-dirty", action="store_true", help="允许工作区有未提交改动（排障用，正式发版不要加）")
+    parser.add_argument("--clean-tree", action="store_true",
+                        help="从 HEAD 的干净 worktree 构建（工作区里别人未提交的改动不进入产物）")
     parser.add_argument("--reuse-artifact", action="store_true", help="跳过打包，用 dist/ 现有产物重生成报告（排障用）")
     parser.add_argument("--report-dir", default=str(RELEASES_DIR), help="报告归档目录（默认 docs/releases/）")
     args = parser.parse_args(argv)
@@ -382,12 +424,22 @@ def main(argv=None) -> int:
     started_at = datetime.datetime.now()
     started = time.time()
     tmp_dir = Path(tempfile.mkdtemp(prefix="serialpid-release-"))
+    out_dir = tmp_dir / "out"
+    out_dir.mkdir()
+    worktree: Optional[Path] = None
 
     try:
         version = step_version()
         git = step_git(args.allow_dirty)
-        tests = step_tests()
-        selftest = step_selftest(tmp_dir)
+
+        source_dir = ROOT
+        if args.clean_tree:
+            worktree = _add_clean_worktree(tmp_dir)
+            source_dir = worktree
+            _say(f"[构建源] HEAD 的干净 worktree：{worktree}")
+
+        tests = step_tests(source_dir)
+        selftest = step_selftest(out_dir, source_dir)
 
         if args.reuse_artifact:
             artifact = DIST_DIR / f"SerialPID-Tuner-v{version}.exe"
@@ -395,10 +447,9 @@ def main(argv=None) -> int:
                 raise StepError(f"--reuse-artifact 指定的产物不存在：{artifact}", "")
             _say(f"[5/6] 跳过打包，复用 {artifact.name}")
         else:
-            artifact_text = step_build(version)
-            artifact = Path(artifact_text)
+            artifact = step_build(version, source_dir)
 
-        fresh = step_freshness(artifact)
+        fresh = step_freshness(artifact, source_dir)
         hash_hex = _sha256(artifact)
         smoke = step_smoke(artifact)
 
@@ -411,6 +462,11 @@ def main(argv=None) -> int:
             hash_hex=hash_hex,
             fresh=fresh,
             smoke=smoke,
+            build_source=(
+                "HEAD 的干净 worktree（工作区未提交改动不进入产物）"
+                if worktree is not None
+                else "当前工作区"
+            ),
             started_at=started_at,
             elapsed=time.time() - started,
         )
@@ -433,13 +489,20 @@ def main(argv=None) -> int:
             _say(_tail(exc.output))
         return 1
     finally:
-        # 临时目录里只有自检 JSON，保留 3 天意义不大，直接清掉
-        try:
-            for child in tmp_dir.iterdir():
+        if worktree is not None:
+            _run(["git", "worktree", "remove", "--force", str(worktree)])
+            _run(["git", "worktree", "prune"])
+        # 临时目录里只有自检 JSON 与可能的 worktree 残留，直接清掉
+        for child in out_dir.glob("*"):
+            try:
                 child.unlink()
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+            except OSError:
+                pass
+        for directory in (out_dir, tmp_dir):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
