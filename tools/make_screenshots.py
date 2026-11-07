@@ -105,29 +105,11 @@ def load_cjk_fonts() -> list[str]:
     for name in _CJK_FAMILY_NAMES:
         if name in installed and name not in loaded:
             loaded.append(name)
-    if loaded:
-        _release_fonts_at_exit()
+    # 不要在这里注册 atexit 去 removeAllApplicationFonts：2026-11-07 的 ubuntu job
+    # 里这么做之后，pytest 打印完汇总、解释器收尾时抛出
+    # "QObject: shared QObject was deleted directly" 并 segfault。字体注册保持到
+    # 进程结束由 Qt 自己收尾即可（xcb 下已不再出现退出期 Bus error）。
     return loaded
-
-
-def _release_fonts_at_exit() -> None:
-    """退出前把注册进来的应用字体内存摘掉。
-
-    2026-11-07 的 ubuntu job 里，pytest 已经打印完汇总（1 failed, 524 passed）
-    之后进程以 ``Bus error (core dumped)``（退出码 135）结束——测试本身跑完了，
-    是解释器退出时字体引擎先释放了 mmap 的字体文件。这里在 atexit 阶段先摘掉
-    注册项，让字体引擎在 QApplication 之前收尾。
-    """
-    import atexit
-
-    def _cleanup() -> None:
-        try:
-            if QApplication.instance() is not None:
-                QFontDatabase.removeAllApplicationFonts()
-        except Exception:  # noqa: BLE001 - 退出阶段不能再抛异常
-            pass
-
-    atexit.register(_cleanup)
 
 
 def make_app() -> QApplication:

@@ -122,6 +122,27 @@ def test_package_job_is_a_hard_gate_with_freshness_guard():
     assert "%s.json" % "selftest-${{ matrix.platform }}" in body
 
 
+def test_shell_scripts_brace_vars_before_cjk():
+    """``$VAR`` 后面紧跟全角字符时必须写成 ``${VAR}``。
+
+    macOS 自带 bash 3.2，会把全角括号的字节并进变量名，``set -u`` 下直接
+    "ARCH?: unbound variable"——2026-11-07 出包 macos 首跑就红在这里。
+    """
+    import re
+
+    pattern = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)([^\x00-\x7f])")
+    offenders = []
+    for path in sorted(REPO.rglob("*.sh")):
+        if ".git" in path.parts:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(REPO)}:{number}: {line.strip()[:60]}")
+    assert not offenders, "shell 脚本里变量后紧跟全角字符要加花括号：\n" + "\n".join(offenders)
+
+
 def test_cross_platform_tests_are_a_hard_gate():
     """跨平台观测矩阵修干净后必须是硬门槛：红叉不能被 continue-on-error 藏掉。"""
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))

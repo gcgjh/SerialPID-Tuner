@@ -88,7 +88,10 @@ else
   PY="python3"
 fi
 
-echo "[1/8] 平台: $PLATFORM-$ARCH（$UNAME_S）"
+# 注意：变量后面紧跟全角字符时必须用 ${VAR}。macOS 自带的是 bash 3.2，
+# 在该版本里 `$ARCH（` 会把全角括号的字节当成变量名的一部分，
+# 配合 set -u 直接报 "ARCH?: unbound variable"（2026-11-07 出包 macos 就红在这）。
+echo "[1/8] 平台: ${PLATFORM}-${ARCH}（${UNAME_S}）"
 echo "       解释器: $PY"
 "$PY" -c 'import sys; print("       版本:", sys.version.split()[0], "|", sys.executable)'
 
@@ -120,7 +123,7 @@ if [ "$DRY_RUN" = "0" ]; then
 fi
 for f in assets/app.ico assets/app.png assets/app.icns; do
   if [ ! -f "$f" ] && [ "$DRY_RUN" = "0" ]; then
-    echo "[ERR] 图标缺失: $f（跑 python tools/make_icon.py）"
+    echo "[ERR] 图标缺失: ${f}（跑 python tools/make_icon.py）"
     exit 1
   fi
 done
@@ -272,6 +275,6 @@ else
 fi
 SIZE="$(du -h "$ARTIFACT" | cut -f1)"
 echo "$SUM  $(basename "$ARTIFACT")" > "${ARTIFACT}.sha256"
-echo "打包完成: $ARTIFACT（$SIZE）"
+echo "打包完成: ${ARTIFACT}（${SIZE}）"
 echo "SHA-256: $SUM"
-echo "未打包目录: $PAYLOAD（本地试跑用，不入库）"
+echo "未打包目录: ${PAYLOAD}（本地试跑用，不入库）"
