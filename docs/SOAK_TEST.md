@@ -161,11 +161,11 @@ Top 20 增长点逐条都能落到容量上限内：
 | `struct.unpack(fmt, payload)` | +2293 KiB / 94,718 块 | `TelemetrySample` 的 4 个 float（约 80k 个）+ 解析元组，被样本持有 |
 | `TelemetrySample(...)` | +2074 KiB / 18,989 块 | `TelemetryBuffer(max_len=20000)` 满载 |
 | `self.rows.append(dict(row))` | +319 KiB / 1,382 块 | 压测脚本自己的 838 行 CSV 记录 |
-| `self._buf.append(sample)`（曲线环形缓冲） | +153 KiB / 297 块 | 20000 点定长环 |
+| `self._buf.append(sample)`（`TelemetryBuffer` 的 deque 指针块） | +153 KiB / 297 块 | 20000 项 ≈ 160 KiB 的定长队列本身 |
 | `tracemalloc` 快照 `traces` / `TraceEntry` | +143 KiB | 快照自身开销（只在对比时存在） |
 
-前两项合计 4.37 MB，占 5.16 MB 总增长的 84.6%，正好是 20000 个样本 ×（对象 112 B + 4 个 float）；
-它们到 20000 就停止增长。**结论：无罪**——不是"哪个对象持续涨多少 MB/h"的泄漏，
+前三项合计 4.52 MB，占 5.16 MB 总增长的 87.6%，正好是 20000 个样本 ×（对象 112 B + 4 个 float）
+再加上定长 deque 的指针块；它们到 20000 就停止增长。**结论：无罪**——不是"哪个对象持续涨多少 MB/h"的泄漏，
 是 `TelemetryBuffer` 一次性的容量填充加分配器 arena 扩张；满载后 4 h 档 0.37 MB/h、30 min 末端 2.6 MB/h，
 都在 5 MB/h 判据内。未做任何"手动 gc"式修补。
 
