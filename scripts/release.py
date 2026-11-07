@@ -225,9 +225,22 @@ def step_build(version: str, repo_dir: Path = ROOT) -> Path:
         if not stable.exists():
             raise StepError(f"打包脚本没有留下稳定名副本 {stable.name}", output)
     else:
-        versioned = dist / f"SerialPID-Tuner-v{version}"
-        if not versioned.exists():
-            raise StepError(f"打包脚本没有产出 {versioned.name}", output)
+        # Linux / macOS 的分发包：tar.gz（Linux onedir）或 zip（macOS .app）。
+        # 优先归档；只有未归档的目录形态时退回单文件可执行（旧版 build.sh）。
+        archives = sorted(
+            path
+            for path in dist.glob(f"SerialPID-Tuner-v{version}*")
+            if path.is_file() and path.name.endswith((".tar.gz", ".zip"))
+        )
+        binaries = sorted(
+            path
+            for path in dist.glob(f"SerialPID-Tuner-v{version}*")
+            if path.is_file() and not path.name.endswith((".tar.gz", ".zip", ".sha256"))
+        )
+        versioned = next(iter(archives or binaries), None)
+        if versioned is None:
+            raise StepError(f"打包脚本没有产出 v{version} 的分发包", output)
+        stable = dist / "SerialPID-Tuner"
 
     if repo_dir != ROOT:
         DIST_DIR.mkdir(parents=True, exist_ok=True)
@@ -299,7 +312,15 @@ def _windows_version_info(artifact: Path) -> Dict[str, str]:
 
 
 def step_smoke(artifact: Path) -> str:
-    """拉起产物，等三秒确认存活。windowed 程序崩溃时不会打印任何东西，只能看进程。"""
+    """拉起产物，等三秒确认存活。windowed 程序崩溃时不会打印任何东西，只能看进程。
+
+    非 Windows 平台的分发物是归档（tar.gz / zip），没法直接执行；那种情况下
+    启动证据来自 ``scripts/build.sh`` 里对**解压后二进制**跑的 ``--selftest``，
+    这里如实跳过而不是假装验过。
+    """
+    if artifact.name.endswith((".tar.gz", ".zip", ".AppImage")):
+        _say(f"      冒烟：{artifact.name} 是归档产物，跳过直接拉起（启动证据见打包脚本的自检）")
+        return f"归档产物，未直接拉起；启动自检由 build.sh 对解压后二进制执行"
     _say(f"      冒烟：启动 {artifact.name} 并等待 {SMOKE_SECONDS}s ...")
     process = subprocess.Popen([str(artifact)])
     try:
@@ -362,6 +383,46 @@ def _stable_copy_path(versioned: Path) -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 
+def _bug_stats() -> Dict[str, object]:
+    """按 docs/BUGS.md 的表格统计缺陷，供发布报告引用（card39）。
+
+    报告只做"照抄清单"的统计，不重新判定状态：条目真假与引证以 docs/BUGS.md
+    为准，避免清单与报告各说一套。
+    """
+    path = ROOT / "docs" / "BUGS.md"
+    if not path.exists():
+        return {}
+    sections: Dict[str, List[str]] = {}
+    current = ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections[current] = []
+        elif current:
+            sections[current].append(line)
+
+    def rows(prefix: str, mark: str) -> List[str]:
+        for title, lines in sections.items():
+            if title.startswith(prefix):
+                return [line for line in lines if line.startswith(f"| {mark}")]
+        return []
+
+    open_rows = rows("二、", "B-")
+    pending_rows = rows("三、", "P-")
+    fixed_rows = rows("一、", "F-") + rows("一、", "B-")
+    levels: Dict[str, int] = {}
+    for row in open_rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        level = cells[1] if len(cells) > 1 else "未标"
+        levels[level] = levels.get(level, 0) + 1
+    return {
+        "open": len(open_rows),
+        "pending": len(pending_rows),
+        "fixed": len(fixed_rows),
+        "levels": levels,
+    }
+
+
 def _render_report(
     *,
     version: str,
@@ -378,7 +439,10 @@ def _render_report(
     elapsed: float,
 ) -> str:
     stable = _stable_copy_path(artifact)
-    stable_text = f"`{stable.relative_to(ROOT).as_posix()}`（与版本化产物同一次构建，供文档引用）"
+    if stable.exists():
+        stable_text = f"`{stable.relative_to(ROOT).as_posix()}`（与版本化产物同一次构建，供文档引用）"
+    else:
+        stable_text = "归档内已含稳定名可执行文件（无独立副本，文档统一引用版本化归档）"
     version_info = fresh.get("version_info") or {}
     version_lines = (
         f"- FileVersion / ProductVersion：{version_info.get('FileVersion', '-')} / "
@@ -404,6 +468,25 @@ def _render_report(
         if clean
         else ""
     )
+    bugs = _bug_stats()
+    if not bugs:
+        bug_lines = "## 缺陷清单\n\n- 未找到 `docs/BUGS.md`，本次报告不含缺陷统计。\n\n"
+    elif not bugs["open"] and not bugs["fixed"] and not bugs["pending"]:
+        bug_lines = (
+            "## 缺陷清单\n\n"
+            "- `docs/BUGS.md` 的表格结构未能解析（应含「一、已修复 / 二、仍存在 / 三、待真机确认」三张表），"
+            "本次报告不含缺陷统计。\n\n"
+        )
+    else:
+        levels = " / ".join(f"{level} {count}" for level, count in bugs["levels"].items()) or "无"
+        bug_lines = (
+            "## 缺陷清单（`docs/BUGS.md` 同步统计）\n\n"
+            f"- 开放缺陷：{bugs['open']} 条（B 类）；待真机确认：{bugs['pending']} 条（P 类）；"
+            f"已修复（带引证）：{bugs['fixed']} 条\n"
+            f"- 严重度分布：{levels}\n"
+            "- 统计方式：解析清单的「一、已修复 / 二、仍存在 / 三、待真机确认」三张表得出，"
+            "不重新判定状态；条目与引证以该文件为准。\n\n"
+        )
     return (
         f"# SerialPID-Tuner v{version} 发布报告\n\n"
         f"> 本文件由 `scripts/release.py` 生成，请随版本入库；**不要手改**。\n\n"
@@ -417,6 +500,7 @@ def _render_report(
         f"## 测试\n\n"
         f"- PC 全量测试：`{tests['summary']}`（{tests['elapsed']}s，`QT_QPA_PLATFORM=offscreen`）{tests_note}\n"
         f"- 长稳档：未纳入本次发布（另跑 `pytest tests/test_long_run.py --long-run`）\n\n"
+        f"{bug_lines}"
         f"## 启动自检（源码环境）\n\n"
         f"- 结果：{selftest['summary']}\n\n"
         f"## 产物\n\n"
@@ -472,7 +556,15 @@ def main(argv=None) -> int:
         selftest = step_selftest(out_dir, source_dir)
 
         if args.reuse_artifact:
-            artifact = DIST_DIR / f"SerialPID-Tuner-v{version}.exe"
+            if sys.platform.startswith("win"):
+                artifact = DIST_DIR / f"SerialPID-Tuner-v{version}.exe"
+            else:
+                candidates = sorted(
+                    path
+                    for path in DIST_DIR.glob(f"SerialPID-Tuner-v{version}*")
+                    if path.is_file() and not path.name.endswith(".sha256")
+                )
+                artifact = candidates[0] if candidates else DIST_DIR / f"SerialPID-Tuner-v{version}"
             if not artifact.exists():
                 raise StepError(f"--reuse-artifact 指定的产物不存在：{artifact}", "")
             _say(f"[5/6] 跳过打包，复用 {artifact.name}")

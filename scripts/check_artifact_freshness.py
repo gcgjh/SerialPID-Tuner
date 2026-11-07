@@ -60,13 +60,27 @@ def newest(files: Iterable[Path]) -> Tuple[Path, float]:
 
 
 def artifacts(dist_dir: Path, pattern: str = "SerialPID-Tuner*") -> List[Path]:
+    """dist/ 里可发布的产物（按平台形态：exe / 无扩展名可执行 / zip / tar.gz）。
+
+    ``.json``（自检结果）、``.md``、``.sha256`` 是旁证不是产物，不能参与新鲜度比较，
+    否则"自检文件刚写出来"就能把落后的包判成新鲜的。
+    """
     if not dist_dir.is_dir():
         return []
-    return sorted(
-        path
-        for path in dist_dir.glob(pattern)
-        if path.is_file() and (path.suffix in (".exe", "") or path.suffix.startswith(".v"))
-    )
+    result: List[Path] = []
+    for path in dist_dir.glob(pattern):
+        if not path.is_file():
+            continue
+        name = path.name.lower()
+        if name.endswith((".json", ".md", ".sha256", ".txt")):
+            continue
+        if (
+            path.suffix in (".exe", "")
+            or path.suffix.startswith(".v")
+            or name.endswith((".zip", ".tar.gz", ".appimage"))
+        ):
+            result.append(path)
+    return sorted(result)
 
 
 def _stamp(path: Path) -> str:
